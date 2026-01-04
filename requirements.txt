@@ -1,0 +1,15 @@
+langchain
+langchain-community
+langchain-core
+langchain-openai
+langgraph
+streamlit
+boto3
+pypdf
+chromadb
+tiktoken
+python-dotenv
+pillow
+scikit-learn
+rank_bm25
+langsmith
