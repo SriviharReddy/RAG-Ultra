@@ -1,0 +1,26 @@
+﻿# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Local Environment & API Keys
+.env
+.env.*
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# IDE & Tool configurations
+.idea/
+.vscode/
+.gemini/
+.system_generated/
