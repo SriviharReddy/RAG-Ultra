@@ -1,20 +1,62 @@
+"""
+Configuration settings for the RAG-Ultra system
+"""
+
 import os
+from pathlib import Path
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class Config:
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-    AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-    
-    CHROMA_PERSIST_DIRECTORY = "chroma_db"
-    COLLECTION_NAME = "rag_ultra_docs"
-    
-    # Models
-    EMBEDDING_MODEL = "text-embedding-3-small"
-    LLM_MODEL = "gpt-4o"
-    VLM_MODEL = "gpt-4o"  # Using GPT-4o for visual reasoning as well
 
-config = Config()
+class AWSConfig(BaseModel):
+    """AWS Configuration"""
+    region: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    bedrock_model_id: str = "amazon.nova-lite-v1:0"
+    embedding_model_id: str = "amazon.titan-embed-text-v2:0"
+
+
+class ChromaConfig(BaseModel):
+    """ChromaDB Configuration"""
+    persist_directory: str = os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma_db")
+    collection_name: str = "rag_ultra_docs"
+
+
+class RetrievalConfig(BaseModel):
+    """Retrieval Configuration"""
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
+    parent_chunk_size: int = 4000
+    top_k_initial: int = 20  # Initial retrieval count
+    top_k_final: int = 5     # After reranking
+
+
+class ModelConfig(BaseModel):
+    """Model Configuration"""
+    max_tokens: int = 4096
+    temperature: float = 0.1
+    streaming: bool = True
+
+
+class Config(BaseModel):
+    """Main Configuration"""
+    aws: AWSConfig = AWSConfig()
+    chroma: ChromaConfig = ChromaConfig()
+    retrieval: RetrievalConfig = RetrievalConfig()
+    model: ModelConfig = ModelConfig()
+    
+    # Data directories
+    data_dir: Path = Path("./data")
+    upload_dir: Path = Path("./data/uploads")
+    processed_dir: Path = Path("./data/processed")
+    
+    def ensure_directories(self):
+        """Create necessary directories if they don't exist"""
+        for dir_path in [self.data_dir, self.upload_dir, self.processed_dir]:
+            dir_path.mkdir(parents=True, exist_ok=True)
+        return self
+
+
+# Global configuration instance
+config = Config().ensure_directories()

@@ -1,15 +1,29 @@
-langchain
-langchain-community
-langchain-core
-langchain-openai
-langgraph
-streamlit
-boto3
-pypdf
-chromadb
-tiktoken
-python-dotenv
-pillow
-scikit-learn
-rank_bm25
-langsmith
+# Core LangChain/LangGraph
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langgraph>=0.2.0
+
+# AWS Bedrock & Services
+langchain-aws>=0.2.0
+boto3>=1.35.0
+amazon-textract-caller>=0.3.0
+amazon-textract-response-parser>=1.0.0
+
+# Vector Store
+chromadb>=0.5.0
+
+# Document Processing
+pypdf>=4.0.0
+pdf2image>=1.17.0
+pillow>=10.0.0
+
+# Frontend
+streamlit>=1.39.0
+
+# Observability
+langsmith>=0.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
