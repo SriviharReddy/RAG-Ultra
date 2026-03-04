@@ -15,8 +15,28 @@ class SotaRagDatabase:
             persist_directory=self.persist_dir
         )
 
-    def ingest_document(self, text: str, metadata: dict):
-        """Basic single-document ingestion."""
-        doc = Document(page_content=text, metadata=metadata)
-        self.vector_db.add_documents([doc])
-        print(f"Ingested document with metadata: {metadata}")
+    def ingest_hierarchical_document(
+        self,
+        parent_text: str,
+        child_chunks: List[str],
+        context_prefix: str,
+        image_url: Optional[str],
+        has_visuals: bool,
+        metadata_origin: dict
+    ):
+        """
+        Ingests child chunks with contextual prefixes. Stores the full parent
+        Markdown and image URI directly in each child's metadata payload.
+        """
+        documents_to_insert = []
+        for chunk in child_chunks:
+            enriched_content = f"[Context: {context_prefix}]\n{chunk}"
+            metadata = {
+                "parent_content": parent_text,
+                "image_url": image_url,
+                "has_visuals": has_visuals,
+                **metadata_origin
+            }
+            doc = Document(page_content=enriched_content, metadata=metadata)
+            documents_to_insert.append(doc)
+        self.vector_db.add_documents(documents_to_insert)
