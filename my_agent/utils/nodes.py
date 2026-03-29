@@ -1,4 +1,6 @@
-﻿import os
+﻿import base64
+import os
+import httpx
 from typing import Dict, Any
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -12,15 +14,26 @@ judge_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 generation_llm = ChatOpenAI(model="gpt-4o", temperature=0.1)
 
 async def retrieve_node(state: AgentState) -> Dict[str, Any]:
-    """Retrieves relevant chunks from vector store."""
     query = state["query"]
     retry_count = state.get("retry_count", 0)
-    results = vector_search_db.invoke({"query": query, "k": 3})
-    chunks = [{"content": r.get("parent_content", r.get("content", "")), "metadata": {k: v for k, v in r.items() if k not in ("content", "parent_content")}} for r in results]
+    search_query = query
+    if retry_count > 0:
+        expansion_prompt = f"Given the query: '{query}', write an expanded semantic search query seeking deep context."
+        expanded_res = await judge_llm.ainvoke([HumanMessage(content=expansion_prompt)])
+        search_query = expanded_res.content.strip()
+    results = vector_search_db.invoke({"query": search_query, "k": 3})
+    from my_agent.utils.state import DocumentChunk
+    chunks = []
+    if isinstance(results, list) and results and "error" not in results[0]:
+        for res in results:
+            chunk = DocumentChunk(
+                content=res["parent_content"],
+                metadata={"has_visuals": res.get("has_visuals"), "image_url": res.get("image_url"), "page": res.get("page"), "source": res.get("source")}
+            )
+            chunks.append(chunk)
     return {"retrieved_chunks": chunks, "retry_count": retry_count + 1}
 
 async def evaluate_relevance_node(state: AgentState) -> Dict[str, Any]:
-    """LLM-as-Judge: evaluates whether retrieved context is sufficient."""
     query = state["query"]
     chunks = state["retrieved_chunks"]
     retry_count = state.get("retry_count", 0)
@@ -37,10 +50,27 @@ Reply ONLY with 'YES' or 'NO'."""
         decision = "retrieve"
     return {"response": decision}
 
-async def generate_response_node(state: AgentState) -> Dict[str, Any]:
-    """Final generation node."""
+async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
+    """Assembles text + optional base64-encoded page images for the VLM."""
     query = state["query"]
-    context = "\n\n".join([c["content"] for c in state["retrieved_chunks"]])
-    prompt = f"Answer strictly based on the context.\n\nQuestion: {query}\n\nContext:\n{context}"
-    response = await generation_llm.ainvoke([HumanMessage(content=prompt)])
+    chunks = state["retrieved_chunks"]
+    message_contents = [{"type": "text", "text": f"User Query: {query}\n\nAnswer strictly based on the retrieved context below."}]
+    async with httpx.AsyncClient() as client:
+        for idx, chunk in enumerate(chunks):
+            text_content = chunk["content"]
+            metadata = chunk["metadata"]
+            message_contents.append({"type": "text", "text": f"--- CONTEXT {idx+1} (Source: {metadata.get('source')}, Page {metadata.get('page')}) ---\n{text_content}"})
+            if metadata.get("has_visuals") and metadata.get("image_url"):
+                try:
+                    img_response = await client.get(metadata["image_url"])
+                    if img_response.status_code == 200:
+                        b64_image = base64.b64encode(img_response.content).decode("utf-8")
+                        message_contents.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}", "detail": "high"}})
+                except Exception as e:
+                    print(f"Image download failed: {e}")
+    return {"llm_inputs": message_contents}
+
+async def generate_response_node(state: AgentState) -> Dict[str, Any]:
+    message = HumanMessage(content=state["llm_inputs"])
+    response = await generation_llm.ainvoke([message])
     return {"response": response.content}
