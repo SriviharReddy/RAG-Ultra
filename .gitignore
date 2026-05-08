@@ -15,6 +15,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# Local Vector & Document Databases (Storage)
+db_storage/
+*.sqlite
+*.db
+
 # OS Files
 .DS_Store
 Thumbs.db
@@ -24,3 +29,6 @@ Thumbs.db
 .vscode/
 .gemini/
 .system_generated/
+
+# Guides and architectural plan files
+misc_files/
