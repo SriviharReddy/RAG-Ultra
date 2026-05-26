@@ -1,4 +1,4 @@
-﻿# RAG-Ultra: SOTA Multi-Modal Agentic RAG Microservice (RaaS)
+# RAG-Ultra: SOTA Multi-Modal Agentic RAG Microservice (RaaS)
 
 RAG-Ultra is a production-grade, minimal, and state-of-the-art (SOTA) **Retrieval-as-a-Service (RaaS) microservice** built in Python utilizing **LangGraph** (v1.2+) and **LangChain** (v1.3+). It is designed to operate as a completely stateless, high-performance REST API that parent conversational chatbots, agent teams, or background workflows can query over HTTP to delegate advanced, layout-aware document intelligence and multi-modal reasoning.
 
@@ -6,10 +6,10 @@ This microservice integrates cutting-edge 2026 engineering principles: **DeepSee
 
 ---
 
-## ≡ƒÜÇ Key Architectural Innovations
+## 🚀 Key Architectural Innovations
 
 ### 1. Ingestion: Layout-Aware Parsing via DeepSeek-OCR-2
-Traditional OCR parsers lose document structure (columns, tables, math formatting). RAG-Ultra utilizes a serverless API hosting **DeepSeek-OCR-2** to natively extract document layers into clean, structured MarkdownΓÇöfully preserving LaTeX mathematical formulas ($\sum_{{i=1}}^n i = \frac{{n(n+1)}}{{2}}$), nested lists, and column hierarchies.
+Traditional OCR parsers lose document structure (columns, tables, math formatting). RAG-Ultra utilizes a serverless API hosting **DeepSeek-OCR-2** to natively extract document layers into clean, structured Markdown — fully preserving LaTeX mathematical formulas ($\sum_{{i=1}}^n i = \frac{{n(n+1)}}{{2}}$), nested lists, and column hierarchies.
 
 ### 2. Semantic Enrichment: Contextual Retrieval
 Small text chunks (e.g. 400 characters) are great for precise vector similarity search but lose overall document context. Using Anthropic's **Contextual Retrieval** pattern, a fast, low-cost model (`gpt-5.5-instant`) generates a 1-sentence page summary that is prepended as a global prefix to every child chunk before embedding, dramatically increasing matching relevance.
@@ -27,92 +27,92 @@ Rather than utilizing a static, linear retrieve-and-generate chain, the Real-Tim
 
 ---
 
-## ≡ƒôè System Topology
+## 📊 System Topology
 
 ```
 ========================================================================================
 1. INGESTION PIPELINE (Asynchronous / Batch)
 ========================================================================================
 [PDF / Image Upload]
-         Γöé
-         Γû╝
-[PyMuPDF Page Splitter] ΓöÇΓöÇΓû║ Normalizes pages to clean JPEG frames (150 DPI)
-         Γöé
-         Γû╝
-[DeepSeek-OCR Tool]     ΓöÇΓöÇΓû║ Serverless DeepSeek-OCR-2 API parses page into Markdown
-         Γöé                  ΓööΓöÇΓû║ Detects if page has visual elements (charts, diagrams)
-         Γöé
-         Γû╝
-[Contextualizer Node]   ΓöÇΓöÇΓû║ gpt-5.5-instant generates 1-sentence page summary
-         Γöé
-         Γû╝
-[Hierarchical Splitter] ΓöÇΓöÇΓû║ Splits page into Parents (2000 chars) and Children (400 chars)
-         Γöé                  ΓööΓöÇΓû║ Prepends contextual prefix to child chunks
-         Γöé
-         Γû╝
-[Vector Database]       ΓöÇΓöÇΓû║ Embeds child chunks. Stores parent markdown AND raw page image 
+         |
+         v
+[PyMuPDF Page Splitter] --> Normalizes pages to clean JPEG frames (150 DPI)
+         |
+         v
+[DeepSeek-OCR Tool]     --> Serverless DeepSeek-OCR-2 API parses page into Markdown
+         |                  └--> Detects if page has visual elements (charts, diagrams)
+         |
+         v
+[Contextualizer Node]   --> gpt-5.5-instant generates 1-sentence page summary
+         |
+         v
+[Hierarchical Splitter] --> Splits page into Parents (2000 chars) and Children (400 chars)
+         |                  └--> Prepends contextual prefix to child chunks
+         |
+         v
+[Vector Database]       --> Embeds child chunks. Stores parent markdown AND raw page image
                             payload in Chroma (Single-Database Pattern).
 
 ========================================================================================
 2. RETRIEVAL & REASONING PIPELINE (LangGraph Real-Time Execution)
 ========================================================================================
                   [ User Prompt Input ]
-                            Γöé
-                            Γû╝
-                  [ Retrieve Node ] ΓùäΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                  Γöé 1. Vector similarity search on child chunks.       Γöé
-                  Γöé 2. Dynamic query expansion on retrieval retries.   Γöé
-                  ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                            Γöé
-                            Γû╝
-                  [ Relevance Evaluator Node ] ΓöÇΓöÇ(Irrelevant / Retry)ΓöÇΓöÇΓöÿ
-                  Γöé (LLM-as-a-Judge inspects top chunks vs. query)
-                  ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-                            Γöé (Relevant / Sufficient Context)
-                            Γû╝
+                            |
+                            v
+                  [ Retrieve Node ] <----------------------------------+
+                  | 1. Vector similarity search on child chunks.      |
+                  | 2. Dynamic query expansion on retrieval retries.  |
+                  +----------+-----------------------------------------+
+                             |
+                             v
+                  [ Relevance Evaluator Node ] --(Irrelevant / Retry)--+
+                  | (LLM-as-a-Judge inspects top chunks vs. query)
+                  +----------+------------------------------------------
+                             | (Relevant / Sufficient Context)
+                             v
                   [ Conditional Multimodal Node ]
-                  Γöé Check if retrieved chunks contain visual references.
-                  Γöé If yes: Download/base64 encode parent page image.
-                  Γöé If no: Bypass image download (saves latency/cost).
-                  ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-                            Γöé
-                            Γû╝
+                  | Check if retrieved chunks contain visual references.
+                  | If yes: Download/base64 encode parent page image.
+                  | If no: Bypass image download (saves latency/cost).
+                  +----------+------------------------------------------
+                             |
+                             v
                   [ Generation Node ]
-                  Γöé Generates final context-grounded answer via GPT-5.5 / Gemini 3.5.
-                  ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+                  | Generates final context-grounded answer via GPT-5.5 / Gemini 3.5.
+                  +------------------------------------------
 ```
 
 ---
 
-## ≡ƒôé Project Directory Structure
+## 📂 Project Directory Structure
 
 ```text
 rag-ultra/
-Γöé
-Γö£ΓöÇΓöÇ my_agent/                 # Compiled LangGraph Workflow
-Γöé   Γö£ΓöÇΓöÇ utils/                # Graph Helpers & State Schemas
-Γöé   Γöé   Γö£ΓöÇΓöÇ __init__.py
-Γöé   Γöé   Γö£ΓöÇΓöÇ state.py          # AgentState Definition
-Γöé   Γöé   Γö£ΓöÇΓöÇ tools.py          # deepseek_ocr_parse & vector_search_db tools
-Γöé   Γöé   ΓööΓöÇΓöÇ nodes.py          # retrieve, evaluate, assemble, and generate nodes
-Γöé   Γö£ΓöÇΓöÇ __init__.py
-Γöé   ΓööΓöÇΓöÇ agent.py              # Constructs and compiles StateGraph
-Γöé
-Γö£ΓöÇΓöÇ core/                     # Ingestion Logic Core
-Γöé   Γö£ΓöÇΓöÇ __init__.py
-Γöé   Γö£ΓöÇΓöÇ database.py           # SotaRagDatabase (Chroma parent-payload wrapper)
-Γöé   ΓööΓöÇΓöÇ contextualizer.py     # Contextual Retrieval summarizer
-Γöé
-Γö£ΓöÇΓöÇ .env                      # Environment Variables Template
-Γö£ΓöÇΓöÇ langgraph.json            # LangGraph CLI config file
-Γö£ΓöÇΓöÇ pyproject.toml            # Dependencies specification
-Γö£ΓöÇΓöÇ app.py                    # REST API FastAPI gateway server
-ΓööΓöÇΓöÇ ingest_cli.py             # Document Ingestion CLI script
+│
+├── my_agent/                 # Compiled LangGraph Workflow
+│   ├── utils/                # Graph Helpers & State Schemas
+│   │   ├── __init__.py
+│   │   ├── state.py          # AgentState Definition
+│   │   ├── tools.py          # deepseek_ocr_parse & vector_search_db tools
+│   │   └── nodes.py          # retrieve, evaluate, assemble, and generate nodes
+│   ├── __init__.py
+│   └── agent.py              # Constructs and compiles StateGraph
+│
+├── core/                     # Ingestion Logic Core
+│   ├── __init__.py
+│   ├── database.py           # SotaRagDatabase (Chroma parent-payload wrapper)
+│   └── contextualizer.py     # Contextual Retrieval summarizer
+│
+├── .env                      # Environment Variables Template
+├── langgraph.json            # LangGraph CLI config file
+├── pyproject.toml            # Dependencies specification
+├── app.py                    # REST API FastAPI gateway server
+└── ingest_cli.py             # Document Ingestion CLI script
 ```
 
 ---
 
-## ≡ƒ¢á∩╕Å Setup & Installation
+## 🛠️ Setup & Installation
 
 The project uses the fast, modern **`uv`** package manager.
 
@@ -136,7 +136,7 @@ NOVITA_API_URL=https://api.novita.ai/v1/chat/completions
 
 ---
 
-## ≡ƒÜÇ Quickstart Guide
+## 🚀 Quickstart Guide
 
 ### Step 1: Ingest a Document
 Normalize and parse an operational handbook or PDF. This splits the pages, invokes DeepSeek-OCR, generates page-level summaries, chunks, and embeds them into Chroma:
@@ -177,9 +177,9 @@ Content-Type: application/json
 
 ---
 
-## ≡ƒô¥ Observability & Tracing
+## 📝 Observability & Tracing
 
- Observability is natively supported using **LangSmith**.
+Observability is natively supported using **LangSmith**.
 To enable granular visual tracing, tool execution metrics, and node transition graphs, simply sync these variables in your `.env`:
 ```ini
 LANGSMITH_TRACING=true
