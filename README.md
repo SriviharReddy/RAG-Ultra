@@ -1,85 +1,105 @@
 # RAG-Ultra: SOTA Multi-Modal Agentic RAG Microservice (RaaS)
 
-RAG-Ultra is a production-grade, minimal, and state-of-the-art (SOTA) **Retrieval-as-a-Service (RaaS) microservice** built in Python utilizing **LangGraph** (v1.2+) and **LangChain** (v1.3+). It is designed to operate as a completely stateless, high-performance REST API that parent conversational chatbots, agent teams, or background workflows can query over HTTP to delegate advanced, layout-aware document intelligence and multi-modal reasoning.
+RAG-Ultra is a production-grade, state-of-the-art **Retrieval-as-a-Service (RaaS) microservice** built in Python utilizing **LangGraph** (v1.2+), **FastAPI**, and **LangChain** (v1.3+). It operates as a stateless, high-performance REST and Server-Sent Events (SSE) API that client applications, parent agent teams, and conversational bots query over HTTP to delegate advanced, layout-aware document intelligence and multimodal reasoning.
 
-This microservice integrates cutting-edge 2026 engineering principles: **DeepSeek-OCR-2 API** for structural layout parsing, **Anthropic's Contextual Retrieval** (page-level metadata enrichment), **Single-Database Parent Payload Storage**, and a **LangGraph agentic correction & conditional multimodal generation loop** (GPT-5.5 / Gemini 3.5).
+The microservice integrates cutting-edge Agentic AI engineering principles:
+1. **Layout-Aware Ingestion & Local Image Caching**: High-fidelity page extraction with DeepSeek-OCR and zero-crash PyMuPDF native fallbacks.
+2. **Anthropic Contextual Retrieval**: Prepends page-level metadata summaries to child chunks for high-recall vector search.
+3. **Single-Database Parent Payloads**: Stores complete parent Markdown and page image paths directly within Chroma metadata, cutting latency and eliminating dual-store synchronization.
+4. **Structured Corrective RAG (CRAG)**: Pydantic-powered LLM-as-a-Judge relevance grading and query expansion.
+5. **Reciprocal Rank Fusion (RRF)**: Merges retried search iterations with prior hits to prevent context loss.
+6. **Conditional Multimodal Context Assembly**: Asynchronously loads and base64-encodes page diagrams only when visuals exist.
+7. **Groundedness Verification & Self-Correction**: Checks generated answers against retrieved context to prevent hallucinations.
+8. **Real-time Streaming (SSE)**: Streams graph node lifecycle transitions and token chunks for live agent telemetry.
 
 ---
 
-## 🚀 Key Architectural Innovations
+## 🚀 Key Architectural Patterns
 
-### 1. Ingestion: Layout-Aware Parsing via DeepSeek-OCR-2
-Traditional OCR parsers lose document structure (columns, tables, math formatting). RAG-Ultra utilizes a serverless API hosting **DeepSeek-OCR-2** to natively extract document layers into clean, structured Markdown — fully preserving LaTeX mathematical formulas ($\sum_{{i=1}}^n i = \frac{{n(n+1)}}{{2}}$), nested lists, and column hierarchies.
+### 1. Ingestion Engine & Layout-Aware Splitter
+- Converts PDF documents into normalized page frames rendered at 150 DPI and cached locally in `./db_storage/images/{doc_id}/page_{page_num}.jpg`.
+- Extracts structured Markdown via **DeepSeek-OCR** with graceful fallback to **PyMuPDF native page extractors** for offline execution.
+- Employs **Recursive Markdown Chunking** (`RecursiveCharacterTextSplitter`), preserving Markdown tables, headers, and code fences.
 
-### 2. Semantic Enrichment: Contextual Retrieval
-Small text chunks (e.g. 400 characters) are great for precise vector similarity search but lose overall document context. Using Anthropic's **Contextual Retrieval** pattern, a fast, low-cost model (`gpt-5.5-instant`) generates a 1-sentence page summary that is prepended as a global prefix to every child chunk before embedding, dramatically increasing matching relevance.
+### 2. Semantic Contextual Retrieval
+Small text chunks (e.g. 500-800 characters) are optimal for dense vector matching but lose document context. RAG-Ultra generates a concise 1-sentence contextual overlay for each page, prepending `[Context: <summary>]\n<chunk>` prior to embedding.
 
-### 3. Storage Efficiency: Single-Database Parent Payloads
-Traditional hierarchical chunking requires deploying, querying, and synchronizing a Vector Database (for children) and an external Key-Value Store (for parent documents). 
-RAG-Ultra implements the **Single-Database Pattern**: child chunks are embedded in **Chroma**, but the complete parent page Markdown and secure page image URLs are written **directly inside the child's metadata payload**. This cuts database lookup network latency in half and eliminates DB synchronization bugs.
+### 3. Single-Database Parent Payloads
+Traditional hierarchical chunking requires separate vector and key-value stores. RAG-Ultra embeds child chunks in **Chroma** while storing the full parent page Markdown, image paths, visual flags, and provenance metadata directly inside the child record's payload.
 
-### 4. Orchestration: LangGraph Agentic Self-Correction
-Rather than utilizing a static, linear retrieve-and-generate chain, the Real-Time query pipeline runs on a compiled **LangGraph State Graph**:
-1. **Retrieve Node**: Conducts similarity search, with dynamic query expansion run on retries.
-2. **LLM-as-a-Judge Node**: An evaluator (`gpt-5.5-instant`) inspects chunk relevance. If irrelevant, it triggers query correction and loops back to retry.
-3. **Conditional Multimodal Node**: Analyzes payload metadata. If a parent page is text-only, it injects only the parent Markdown. If visual objects (charts, plots, blueprints) are marked, it downloads and base64-encodes the parent image, invoking **full visual reasoning** only when necessary to save VRAM and token overhead.
-4. **Generator Node**: Generates the final, grounded answer using **`gpt-5.5`** or **`gemini-3.5-flash`**.
+### 4. LangGraph Corrective Agent Loop
+The inference workflow executes as a compiled LangGraph state machine:
+- **`retrieve`**: Asynchronous vector similarity search supporting metadata filters and query expansion.
+- **`evaluate`**: Structured `GradeEvaluation` Pydantic LLM-as-a-Judge. Loops back to `retrieve` if context is insufficient.
+- **`assemble`**: Concurrently loads local/remote visual page images, deduplicates context blocks, and formats structured inline citations (`[^1]`).
+- **`generate`**: Synthesizes a grounded response via multimodal LLM.
+- **`verify`**: Evaluates `GroundednessEvaluation`. Initiates corrective retrieval if hallucinations are detected.
 
 ---
 
 ## 📊 System Topology
 
-```
+```text
 ========================================================================================
-1. INGESTION PIPELINE (Asynchronous / Batch)
+1. INGESTION PIPELINE (Batch / Multipart Upload)
 ========================================================================================
-[PDF / Image Upload]
+[PDF / Markdown Document]
          |
          v
-[PyMuPDF Page Splitter] --> Normalizes pages to clean JPEG frames (150 DPI)
+[PyMuPDF Page Splitter]    --> Normalizes pages to JPEG frames (150 DPI) in ./db_storage/images/
          |
          v
-[DeepSeek-OCR Tool]     --> Serverless DeepSeek-OCR-2 API parses page into Markdown
-         |                  └--> Detects if page has visual elements (charts, diagrams)
+[OCR Engine / Fallback]    --> DeepSeek-OCR API (or PyMuPDF native extractor)
+         |                     └--> Detects tables, charts, diagrams (has_visuals: True/False)
+         v
+[Contextualizer Node]      --> Generates 1-sentence page contextual overlay
          |
          v
-[Contextualizer Node]   --> gpt-5.5-instant generates 1-sentence page summary
+[Recursive MD Splitter]    --> Markdown-aware splitting preserving tables & section headers
          |
          v
-[Hierarchical Splitter] --> Splits page into Parents (2000 chars) and Children (400 chars)
-         |                  └--> Prepends contextual prefix to child chunks
-         |
-         v
-[Vector Database]       --> Embeds child chunks. Stores parent markdown AND raw page image
-                            payload in Chroma (Single-Database Pattern).
+[Chroma Vector Database]   --> Ingests child chunks with parent markdown & image path payloads
 
 ========================================================================================
-2. RETRIEVAL & REASONING PIPELINE (LangGraph Real-Time Execution)
+2. AGENTIC RETRIEVAL & REASONING PIPELINE (LangGraph Execution)
 ========================================================================================
-                  [ User Prompt Input ]
-                            |
-                            v
-                  [ Retrieve Node ] <----------------------------------+
-                  | 1. Vector similarity search on child chunks.      |
-                  | 2. Dynamic query expansion on retrieval retries.  |
-                  +----------+-----------------------------------------+
-                             |
+             [ User Query / Chat History ]
+                         |
+                         v
+             [ Pattern A Query Condenser ]
+                         |
+                         v
++-----------> [ Retrieve Node ] <----------------------------------------+
+|             | 1. Async similarity search in Chroma.                   |
+|             | 2. Reciprocal Rank Fusion (RRF) on retry merges.        |
+|             +----------+----------------------------------------------+
+|                        |
+|                        v
+|             [ Relevance Evaluator Node ] (LLM-as-a-Judge)
+|             | Structured Pydantic GradeEvaluation (is_relevant, critique)
+|             +----------+----------------------------------------------+
+|                        |
+|        (Relevant / Max Retries)               (Insufficient Context)
+|                        |                                 |
+|                        v                                 |
+|             [ Multimodal Assembly Node ]                 |
+|             | Deduplicates parent context blocks.        |
+|             | Concurrently loads & encodes visual images.|
+|             | Generates structured inline citations [^N].|
+|             +----------+---------------------------------+
+|                        |
+|                        v
+|             [ Generation Node ]
+|             | Synthesizes answer using Multimodal LLM.
+|             +----------+---------------------------------+
+|                        |
+|                        v
++------------ [ Groundedness Verifier Node ] (Self-Correction)
+(Unhallucinated)   | Pydantic GroundednessEvaluation (is_grounded, score)
+   Loopback       +----------+---------------------------------+
+                             | (Verified Grounded / Max Retries)
                              v
-                  [ Relevance Evaluator Node ] --(Irrelevant / Retry)--+
-                  | (LLM-as-a-Judge inspects top chunks vs. query)
-                  +----------+------------------------------------------
-                             | (Relevant / Sufficient Context)
-                             v
-                  [ Conditional Multimodal Node ]
-                  | Check if retrieved chunks contain visual references.
-                  | If yes: Download/base64 encode parent page image.
-                  | If no: Bypass image download (saves latency/cost).
-                  +----------+------------------------------------------
-                             |
-                             v
-                  [ Generation Node ]
-                  | Generates final context-grounded answer via GPT-5.5 / Gemini 3.5.
-                  +------------------------------------------
+                         [ [END] ] -> Final Markdown Response with Footnotes
 ```
 
 ---
@@ -89,101 +109,221 @@ Rather than utilizing a static, linear retrieve-and-generate chain, the Real-Tim
 ```text
 rag-ultra/
 │
+├── core/
+│   ├── __init__.py
+│   ├── config.py             # Centralized Pydantic settings & LLM provider factories
+│   ├── database.py           # SotaRagDatabase Chroma async manager with parent payloads
+│   └── contextualizer.py     # Contextual Retrieval summarizer with offline fallback
+│
 ├── my_agent/                 # Compiled LangGraph Workflow
-│   ├── utils/                # Graph Helpers & State Schemas
-│   │   ├── __init__.py
-│   │   ├── state.py          # AgentState Definition
-│   │   ├── tools.py          # deepseek_ocr_parse & vector_search_db tools
-│   │   └── nodes.py          # retrieve, evaluate, assemble, and generate nodes
 │   ├── __init__.py
-│   └── agent.py              # Constructs and compiles StateGraph
+│   ├── agent.py              # Compiled StateGraph with CRAG & Groundedness edges
+│   └── utils/
+│       ├── __init__.py
+│       ├── state.py          # Typed AgentState, DocumentChunk, Citation schemas
+│       ├── nodes.py          # retrieve, evaluate, assemble, generate, verify nodes
+│       └── tools.py          # Vector search and DeepSeek OCR tool definitions
 │
-├── core/                     # Ingestion Logic Core
-│   ├── __init__.py
-│   ├── database.py           # SotaRagDatabase (Chroma parent-payload wrapper)
-│   └── contextualizer.py     # Contextual Retrieval summarizer
-│
-├── .env                      # Environment Variables Template
-├── langgraph.json            # LangGraph CLI config file
-├── pyproject.toml            # Dependencies specification
-├── app.py                    # REST API FastAPI gateway server
-└── ingest_cli.py             # Document Ingestion CLI script
+├── app.py                    # FastAPI Gateway (REST, SSE streaming, file ingestion)
+├── ingest_cli.py             # CLI Ingestion tool (PDF/MD layout chunking)
+├── demo.py                   # Self-contained showcase demo & verification suite
+├── pyproject.toml            # Dependencies and virtual environment spec
+└── README.md
 ```
 
 ---
 
 ## 🛠️ Setup & Installation
 
-The project uses the fast, modern **`uv`** package manager.
+The project uses the fast **`uv`** package manager.
 
-### 1. Clone the repository and sync dependencies:
+### 1. Install dependencies:
 ```bash
-# Installs Python virtual environment and all requirements
+# Automatically creates .venv and installs all dependencies
 uv sync
 ```
 
-### 2. Configure Environment Variables:
-Copy the template `.env` file and insert your API credentials:
-```bash
-# Rename or edit .env
-# Set your OpenAI key (required for embeddings and generation)
+### 2. Configure Environment (`.env`):
+Create or edit your `.env` file:
+```ini
+# OpenAI Configuration (Embeddings, Fast Judge, and Generation LLM)
 OPENAI_API_KEY=your_openai_api_key_here
+# OPENAI_BASE_URL=https://api.openai.com/v1
 
-# Set your Novita AI key (required for DeepSeek-OCR API)
-NOVITA_API_KEY=your_novita_api_key_here
-NOVITA_API_URL=https://api.novita.ai/v1/chat/completions
+# Optional OCR Provider (DeepSeek-OCR API)
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+
+# Model Names
+FAST_LLM_MODEL=gpt-4o-mini
+GENERATION_LLM_MODEL=gpt-4o
+EMBEDDING_MODEL=text-embedding-3-small
+
+# Storage Directories
+PERSIST_DIR=./db_storage/chroma
+IMAGE_STORAGE_DIR=./db_storage/images
+COLLECTION_NAME=sota_rag_collection
 ```
 
 ---
 
-## 🚀 Quickstart Guide
+## 🚀 Running the End-to-End Showcase Demo
 
-### Step 1: Ingest a Document
-Normalize and parse an operational handbook or PDF. This splits the pages, invokes DeepSeek-OCR, generates page-level summaries, chunks, and embeds them into Chroma:
+To execute the complete end-to-end verification suite with zero external infrastructure:
 ```bash
-uv run python ingest_cli.py --pdf path/to/your/document.pdf --id manual_001
+uv run python demo.py
 ```
+This standalone script:
+1. Generates a sample multi-page industrial manual (`turbine_alpha9_manual.pdf`) with technical diagrams and calibration tables.
+2. Ingests the PDF, creates local image caches, generates contextual prefixes, and indexes parent-child payloads in Chroma.
+3. Tests **Pattern A Conversational Query Condensation** ("What about in wet conditions?").
+4. Executes the **LangGraph CRAG State Machine** with relevance grading, multimodal visual assembly, and inline citations.
+5. Tests the **FastAPI Gateway**:
+   - `GET /api/v1/health`
+   - `POST /api/v1/ingest` (multipart file upload)
+   - `POST /api/v1/query` (stateless query)
+   - `POST /api/v1/query/stream` (real-time Server-Sent Events stream)
 
-### Step 2: Launch the FastAPI Backend
+---
 
-Start the REST API gateway:
+## 📡 REST API Gateway Reference
 
+Start the production server:
 ```bash
 uv run python app.py
 ```
 
-The query endpoint is designed to be completely **stateless**. Since RAG-Ultra utilizes real-time query condensation, there is **no need to supply a `thread_id`** or manage state checkpointers in the database. Instead, the parent chatbot simply passes the preceding conversational log directly in the `chat_history` payload, and the gateway automatically condenses follow-up queries before searching:
+### 1. Health Check
+```http
+GET /api/v1/health
+```
+**Response:**
+```json
+{
+  "status": "healthy",
+  "version": "1.0.0",
+  "collection_name": "sota_rag_collection",
+  "collection_count": 12,
+  "models": {
+    "fast_llm": "gpt-4o-mini",
+    "generation_llm": "gpt-4o",
+    "embedding": "text-embedding-3-small"
+  }
+}
+```
 
+### 2. Ingest Document (Multipart Upload)
+```http
+POST /api/v1/ingest
+Content-Type: multipart/form-data
+```
+**Parameters:**
+- `file`: PDF or Markdown file binary.
+- `document_id`: (Optional) Unique document string identifier.
+- `chunk_size`: (Optional) Integer chunk character length (default: 800).
+- `chunk_overlap`: (Optional) Integer chunk overlap (default: 100).
+
+**Response:**
+```json
+{
+  "success": true,
+  "doc_id": "manual_turbine_a9",
+  "source": "turbine_manual.pdf",
+  "pages_processed": 2,
+  "total_chunks_indexed": 6,
+  "message": "Successfully indexed document 'turbine_manual.pdf' with 6 chunks."
+}
+```
+
+### 3. Stateless Query
 ```http
 POST /api/v1/query
 Content-Type: application/json
 ```
-
+**Payload:**
 ```json
 {
-  "query": "Is it valid in wet conditions?",
+  "query": "What about in wet conditions?",
   "chat_history": [
     {
       "role": "user",
-      "content": "What is the safety checklist for operating Valve A?"
+      "content": "What is the maximum pressure limit for Turbine Alpha-9?"
     },
     {
       "role": "assistant",
-      "content": "The safety checklist for Valve A requires dry conditions, insulation tools, and gloves."
+      "content": "The maximum nominal pressure is 450 PSI with emergency vent at 520 PSI."
     }
-  ]
+  ],
+  "metadata_filter": {
+    "doc_id": "manual_turbine_a9"
+  }
 }
+```
+**Response:**
+```json
+{
+  "success": true,
+  "raw_query": "What about in wet conditions?",
+  "condensed_query": "What are the operating protocols and constraints for Turbine Alpha-9 in wet conditions?",
+  "answer": "Operating in wet environments requires adherence to Protocol W-7 [^1]. Key requirements include:\n- Verifying IP67 waterproof enclosure seals [^1]\n- Derating continuous output by 15% when humidity exceeds 90% [^1]\n- Enabling automatic manifold heaters below 4°C [^1].",
+  "citations": [
+    {
+      "id": 1,
+      "source": "turbine_manual.pdf",
+      "page": 2,
+      "doc_id": "manual_turbine_a9",
+      "snippet": "Turbine Alpha-9 Operating Manual Section 2: Wet Conditions and Flood Protocol...",
+      "image_url": "/static/images/manual_turbine_a9/page_2.jpg"
+    }
+  ],
+  "retrieved_chunks": [...],
+  "metadata": {
+    "retry_count": 0,
+    "latency_ms": 842.15,
+    "is_relevant": true,
+    "is_grounded": true,
+    "groundedness_score": 1.0,
+    "critique": "Context fully supports all claims."
+  }
+}
+```
+
+### 4. Real-time SSE Streaming
+```http
+POST /api/v1/query/stream
+Content-Type: application/json
+```
+Streams real-time Server-Sent Events (`text/event-stream`):
+- `event: query_condensed` -> Emits standalone rewritten question.
+- `event: retrieving` -> Emits candidate chunk count and source metadata.
+- `event: evaluating` -> Emits LLM-as-a-Judge relevance verdict and critique.
+- `event: multimodal_assembly` -> Emits loaded citations and visual image count.
+- `event: token` -> Streams generated token increments.
+- `event: verifying` -> Emits groundedness score and verification verdict.
+- `event: final_result` -> Emits complete response object with citations and latency.
+- `event: done` -> Final completion marker.
+
+---
+
+## 🛠️ CLI Ingestion Tool
+
+You can ingest files directly via the CLI:
+```bash
+# Ingest PDF
+uv run python ingest_cli.py --file docs/handbook.pdf --id handbook_v1 --chunk-size 600 --chunk-overlap 100
+
+# Ingest Markdown
+uv run python ingest_cli.py --file docs/architecture.md --id arch_doc
 ```
 
 ---
 
 ## 📝 Observability & Tracing
 
-Observability is natively supported using **LangSmith**.
-To enable granular visual tracing, tool execution metrics, and node transition graphs, simply sync these variables in your `.env`:
+Granular observability is supported via **LangSmith**. Set the following environment variables:
 ```ini
 LANGSMITH_TRACING=true
-LANGSMITH_API_KEY=your_langsmith_api_key_here
+LANGSMITH_API_KEY=your_langsmith_api_key
 LANGSMITH_PROJECT=rag-ultra-agent
 ```
-Once enabled, every query run will be instantly traceable inside your LangSmith dashboard, allowing you to review LLM-as-a-Judge outputs, token counts, and API response speeds.
+Once enabled, every LangGraph node transition, LLM evaluation prompt, and retrieval score is visible in the LangSmith dashboard.
