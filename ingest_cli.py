@@ -155,7 +155,7 @@ async def ingest_file(
 
         # Step 3: Contextual Retrieval prefix
         print("[Ingest Engine] Generating Contextual prefix...")
-        context_prefix = await enricher.generate_page_prefix(doc_summary, page_markdown[:1500])
+        context_prefix = await enricher.generate_page_prefix(doc_summary, page_markdown[:1500], page_num=page_num)
         print(f"[Ingest Engine] Prefix: \"{context_prefix}\"")
 
         # Step 4: Recursive Markdown chunking

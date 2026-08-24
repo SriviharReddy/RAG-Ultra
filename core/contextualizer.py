@@ -1,4 +1,3 @@
-
 from langchain_core.messages import HumanMessage
 from core.config import get_fast_llm
 
@@ -14,21 +13,21 @@ class ContextualRetrievalEnricher:
         except Exception:
             self.llm = None
 
-    async def generate_page_prefix(self, document_summary: str, page_content: str) -> str:
-        """Generates a concise 1-sentence contextual overlay for a chunk."""
-        prompt = f"""
-Given the following document summary and page content, write a single-sentence context prefix.
-This prefix will be prepended to search chunks from this page to make them self-contained.
+    async def generate_page_prefix(self, document_summary: str, page_content: str, page_num: int = 1) -> str:
+        """Generates a concise 1-sentence contextual overlay for a chunk with structural metadata."""
+        prompt = f"""<document_context>
+{document_summary}
+</document_context>
+<page_content page="{page_num}">
+{page_content}
+</page_content>
 
-Document Summary: {document_summary}
-Page Content: {page_content}
-
-Answer ONLY with the single-sentence prefix. Do not add introductions, quotes, or markdown wrappers.
-"""
+Provide a concise 1-2 sentence context prefix situating this page content within the broader document.
+Mention the primary topic, section purpose, and key entities. Output ONLY the raw context sentence with no wrappers."""
         if self.llm is not None:
             try:
                 response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-                prefix = response.content.strip()
+                prefix = str(response.content).strip()
                 if prefix:
                     return prefix
             except Exception as e:
@@ -38,4 +37,4 @@ Answer ONLY with the single-sentence prefix. Do not add introductions, quotes, o
         # Fallback deterministic prefix
         clean_summary = document_summary.replace("\n", " ").strip()
         first_line = page_content.strip().split("\n")[0][:80].strip()
-        return f"Context from '{clean_summary}': {first_line}"
+        return f"Context from '{clean_summary}' (Page {page_num}): {first_line}"

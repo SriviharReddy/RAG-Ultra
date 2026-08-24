@@ -91,7 +91,7 @@ async def vision_ocr_parse(image_source: str) -> str:
 
         ocr_llm = ChatOpenAI(**ocr_client_kwargs)
         message = HumanMessage(content=[
-            {"type": "text", "text": "Convert this document page to complete, structured Markdown. Preserve all tables, headings, and lists accurately. Output only the Markdown."},
+            {"type": "text", "text": "Convert this document page into clean, structured Markdown. Format all tables using standard GitHub-flavored Markdown (| col |). Render mathematical equations using LaTeX delimiters ($...$ for inline, $$...$$ for block). Preserve headings, footnotes, and bullet hierarchies. Output ONLY the raw Markdown."},
             {"type": "image_url", "image_url": image_url_payload}
         ])
         response = await ocr_llm.ainvoke([message])

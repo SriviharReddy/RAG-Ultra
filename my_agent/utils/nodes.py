@@ -152,6 +152,18 @@ async def evaluate_relevance_node(state: AgentState) -> Dict[str, Any]:
                 "critique": "Max retries reached with empty retrieval. Proceeding with best effort."
             }
 
+    # High-confidence fast-path: Bypass judge LLM when top chunk has high relevance
+    top_chunk_score = chunks[0].get("score")
+    if top_chunk_score is not None and top_chunk_score >= 0.82:
+        print(f"[Judge Fast-Path] Top chunk score ({top_chunk_score:.3f} >= 0.82) indicates high confidence. Bypassing judge LLM.")
+        return {
+            "is_relevant": True,
+            "critique": f"High confidence similarity match (Score: {top_chunk_score:.3f}).",
+            "expanded_query": None,
+            "route_decision": "assemble",
+            "retry_count": retry_count
+        }
+
     contexts_text = "\n\n".join([
         f"[Doc {idx+1} | Source: {c.get('metadata', {}).get('source', 'Unknown')} | Page: {c.get('metadata', {}).get('page', 1)}]\n{c.get('content', '')}"
         for idx, c in enumerate(chunks)
