@@ -46,10 +46,17 @@ class Settings(BaseSettings):
     # API Keys & Endpoints
     openai_api_key: Optional[str] = None
     openai_base_url: Optional[str] = None
+
+    # OCR Provider Settings (Novita AI, OpenAI Vision, or custom VLM endpoint)
+    ocr_provider: str = "auto"  # "auto", "openai", "novita", "custom"
+    ocr_model: str = "gpt-4o-mini"
+    ocr_api_key: Optional[str] = None
+    ocr_base_url: Optional[str] = None
+    novita_api_key: Optional[str] = None
+    novita_base_url: str = "https://api.novita.ai/v1"
+    novita_model: str = "qwen/qwen-2.5-vl-72b-instruct"
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    novita_api_key: Optional[str] = None
-
     # Model Provider Settings
     fast_llm_model: str = "gpt-4o-mini"
     generation_llm_model: str = "gpt-4o"

@@ -3,7 +3,7 @@
 RAG-Ultra is a production-grade, state-of-the-art **Retrieval-as-a-Service (RaaS) microservice** built in Python utilizing **LangGraph** (v1.2+), **FastAPI**, and **LangChain** (v1.3+). It operates as a stateless, high-performance REST and Server-Sent Events (SSE) API that client applications, parent agent teams, and conversational bots query over HTTP to delegate advanced, layout-aware document intelligence and multimodal reasoning.
 
 The microservice integrates cutting-edge Agentic AI engineering principles:
-1. **Layout-Aware Ingestion & Local Image Caching**: High-fidelity page extraction with DeepSeek-OCR and zero-crash PyMuPDF native fallbacks.
+1. **Layout-Aware Ingestion & Local Image Caching**: High-fidelity page extraction with Vision OCR (Novita AI, OpenAI Vision, or custom VLM endpoint) and zero-crash PyMuPDF native fallbacks.
 2. **Anthropic Contextual Retrieval**: Prepends page-level metadata summaries to child chunks for high-recall vector search.
 3. **Single-Database Parent Payloads**: Stores complete parent Markdown and page image paths directly within Chroma metadata, cutting latency and eliminating dual-store synchronization.
 4. **Structured Corrective RAG (CRAG)**: Pydantic-powered LLM-as-a-Judge relevance grading and query expansion.
@@ -18,7 +18,7 @@ The microservice integrates cutting-edge Agentic AI engineering principles:
 
 ### 1. Ingestion Engine & Layout-Aware Splitter
 - Converts PDF documents into normalized page frames rendered at 150 DPI and cached locally in `./db_storage/images/{doc_id}/page_{page_num}.jpg`.
-- Extracts structured Markdown via **DeepSeek-OCR** with graceful fallback to **PyMuPDF native page extractors** for offline execution.
+- Extracts structured Markdown via **Vision OCR** (Novita AI `qwen-2.5-vl`, OpenAI Vision `gpt-4o-mini`, or custom VLM) with graceful fallback to **PyMuPDF native page extractors** for offline execution.
 - Employs **Recursive Markdown Chunking** (`RecursiveCharacterTextSplitter`), preserving Markdown tables, headers, and code fences.
 
 ### 2. Semantic Contextual Retrieval
@@ -49,7 +49,7 @@ The inference workflow executes as a compiled LangGraph state machine:
 [PyMuPDF Page Splitter]    --> Normalizes pages to JPEG frames (150 DPI) in ./db_storage/images/
          |
          v
-[OCR Engine / Fallback]    --> DeepSeek-OCR API (or PyMuPDF native extractor)
+[OCR Engine / Fallback]    --> Vision OCR API (Novita AI / OpenAI Vision / PyMuPDF native extractor)
          |                     └--> Detects tables, charts, diagrams (has_visuals: True/False)
          v
 [Contextualizer Node]      --> Generates 1-sentence page contextual overlay
@@ -150,10 +150,12 @@ Create or edit your `.env` file:
 OPENAI_API_KEY=your_openai_api_key_here
 # OPENAI_BASE_URL=https://api.openai.com/v1
 
-# Optional OCR Provider (DeepSeek-OCR API)
-DEEPSEEK_API_KEY=your_deepseek_api_key_here
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-
+# Optional Vision OCR Provider (Novita AI / Custom VLM)
+NOVITA_API_KEY=your_novita_api_key_here
+NOVITA_BASE_URL=https://api.novita.ai/v1
+NOVITA_MODEL=qwen/qwen-2.5-vl-72b-instruct
+# Note: Official api.deepseek.com only provides text endpoints; open-weights VLMs (DeepSeek-VL, Qwen-VL)
+# are hosted on serverless providers like Novita AI, OpenRouter, or handled directly via OpenAI Vision.
 # Model Names
 FAST_LLM_MODEL=gpt-4o-mini
 GENERATION_LLM_MODEL=gpt-4o

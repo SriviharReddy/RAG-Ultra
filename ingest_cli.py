@@ -7,7 +7,7 @@ from PIL import Image
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from my_agent.utils.tools import deepseek_ocr_parse
+from my_agent.utils.tools import vision_ocr_parse
 from core.database import get_database
 from core.contextualizer import ContextualRetrievalEnricher
 from core.config import get_settings
@@ -143,11 +143,11 @@ async def ingest_file(
         # Step 2: Attempt OCR if local disk image is available, else native text fallback
         page_markdown = ""
         if image_disk_path and os.path.exists(image_disk_path):
-            print(f"[Ingest Engine] Trying DeepSeek OCR for page {page_num}...")
-            ocr_result = await deepseek_ocr_parse.ainvoke({"image_source": image_disk_path})
+            print(f"[Ingest Engine] Trying Vision OCR for page {page_num}...")
+            ocr_result = await vision_ocr_parse.ainvoke({"image_source": image_disk_path})
             if ocr_result and len(ocr_result.strip()) > 20:
                 page_markdown = ocr_result.strip()
-                print(f"[Ingest Engine] DeepSeek OCR succeeded ({len(page_markdown)} chars).")
+                print(f"[Ingest Engine] Vision OCR succeeded ({len(page_markdown)} chars).")
 
         if not page_markdown:
             print(f"[Ingest Engine] Using native layout text ({len(native_text)} chars).")

@@ -38,13 +38,46 @@ async def vector_search_db_async(query: str, k: int = 3, metadata_filter: Option
     return output
 
 @tool
-async def deepseek_ocr_parse(image_source: str) -> str:
+async def vision_ocr_parse(image_source: str) -> str:
     """
-    Uses DeepSeek vision model to OCR and convert a page image (URL or local path) to structured Markdown.
-    Gracefully falls back if API key is not configured.
+    Uses a Vision LLM (Novita AI, OpenAI Vision, or custom VLM endpoint) to OCR and convert
+    a page image (URL or local path) to structured Markdown.
+    Falls back to native extraction if no vision provider is configured or available.
     """
     settings = get_settings()
-    if not settings.deepseek_api_key:
+
+    # Determine active Vision/OCR provider
+    ocr_client_kwargs: Dict[str, Any] = {}
+    provider_name = ""
+
+    if settings.novita_api_key:
+        provider_name = "Novita AI"
+        ocr_client_kwargs = {
+            "model": settings.novita_model,
+            "base_url": settings.novita_base_url,
+            "api_key": settings.novita_api_key,
+            "temperature": 0.0
+        }
+    elif settings.ocr_api_key and settings.ocr_base_url:
+        provider_name = "Custom OCR"
+        ocr_client_kwargs = {
+            "model": settings.ocr_model,
+            "base_url": settings.ocr_base_url,
+            "api_key": settings.ocr_api_key,
+            "temperature": 0.0
+        }
+    elif settings.openai_api_key or os.getenv("OPENAI_API_KEY"):
+        provider_name = "OpenAI Vision"
+        api_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+        ocr_client_kwargs = {
+            "model": settings.ocr_model or "gpt-4o-mini",
+            "api_key": api_key,
+            "temperature": 0.0
+        }
+        if settings.openai_base_url:
+            ocr_client_kwargs["base_url"] = settings.openai_base_url
+    else:
+        # No external vision API available; fallback to PyMuPDF native extractor
         return ""
 
     try:
@@ -56,12 +89,7 @@ async def deepseek_ocr_parse(image_source: str) -> str:
         else:
             image_url_payload = {"url": image_source}
 
-        ocr_llm = ChatOpenAI(
-            model="deepseek-chat",
-            temperature=0,
-            base_url=settings.deepseek_base_url,
-            api_key=settings.deepseek_api_key
-        )
+        ocr_llm = ChatOpenAI(**ocr_client_kwargs)
         message = HumanMessage(content=[
             {"type": "text", "text": "Convert this document page to complete, structured Markdown. Preserve all tables, headings, and lists accurately. Output only the Markdown."},
             {"type": "image_url", "image_url": image_url_payload}
@@ -69,5 +97,8 @@ async def deepseek_ocr_parse(image_source: str) -> str:
         response = await ocr_llm.ainvoke([message])
         return str(response.content).strip()
     except Exception as e:
-        print(f"[OCR Tool] DeepSeek OCR call failed ({e}), falling back to native extractor.")
+        print(f"[OCR Tool] {provider_name} call failed ({e}), falling back to native extractor.")
         return ""
+
+# Backward compatibility alias
+deepseek_ocr_parse = vision_ocr_parse
