@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from typing import List, Optional, Tuple, Dict, Any
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -128,7 +129,7 @@ class SotaRagDatabase:
     def get_collection_count(self) -> int:
         """Returns the total number of indexed chunk records."""
         try:
-            return self.vector_db._collection.count()
+            return len(self.vector_db.get()['ids'])
         except Exception:
             return 0
 
@@ -137,8 +138,12 @@ class SotaRagDatabase:
         return await asyncio.to_thread(self.get_collection_count)
 
 
+_db_lock = threading.Lock()
+
 def get_database() -> SotaRagDatabase:
     """Provides a singleton instance of the vector database wrapper."""
     if SotaRagDatabase._instance is None:
-        SotaRagDatabase._instance = SotaRagDatabase()
+        with _db_lock:
+            if SotaRagDatabase._instance is None:
+                SotaRagDatabase._instance = SotaRagDatabase()
     return SotaRagDatabase._instance
