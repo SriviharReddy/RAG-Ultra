@@ -411,4 +411,4 @@ async def query_rag_agent_stream(request: QueryRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host=settings.host, port=settings.port, reload=os.getenv("UVICORN_RELOAD", "false").lower() == "true")
+    uvicorn.run("app:app", host=settings.host, port=settings.port, reload=settings.uvicorn_reload)

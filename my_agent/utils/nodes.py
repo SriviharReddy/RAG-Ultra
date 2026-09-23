@@ -5,11 +5,11 @@ logger = logging.getLogger(__name__)
 import os
 import base64
 import asyncio
-import mimetypes
 from typing import Dict, Any, List, Optional
 import httpx
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
+from my_agent.utils.tools import encode_image_data_uri
 from my_agent.utils.state import AgentState, DocumentChunk, Citation
 from core.database import get_database
 from core.config import get_settings, get_fast_llm, get_generation_llm
@@ -271,36 +271,31 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
     # Concurrently load images
     async def load_single_image(cid: int, img_source: str) -> Optional[Dict[str, Any]]:
         try:
-            if os.path.exists(img_source):
-                mime_type = mimetypes.guess_type(img_source)[0] or "image/jpeg"
-                with open(img_source, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                return {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{b64}", "detail": "high"}
-                }
-            elif img_source.startswith("http://") or img_source.startswith("https://"):
+            if img_source.startswith("http://") or img_source.startswith("https://"):
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.get(img_source)
                     if resp.status_code == 200:
                         mime_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-                        b64 = base64.b64encode(resp.content).decode("utf-8")
+                        encoded = base64.b64encode(resp.content).decode("utf-8")
                         return {
                             "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{b64}", "detail": "high"}
+                            "image_url": {"url": f"data:{mime_type};base64,{encoded}", "detail": "high"}
                         }
+                return None
+
+            if os.path.exists(img_source):
+                local_path = img_source
             elif img_source.startswith("/static/images/"):
-                # Map static URL to local storage directory
-                rel_path = img_source.replace("/static/images/", "")
+                rel_path = img_source.replace("/static/images/", "", 1)
                 local_path = os.path.join(settings.image_storage_dir, rel_path)
-                if os.path.exists(local_path):
-                    mime_type = mimetypes.guess_type(local_path)[0] or "image/jpeg"
-                    with open(local_path, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode("utf-8")
-                    return {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{b64}", "detail": "high"}
-                    }
+            else:
+                return None
+
+            if os.path.exists(local_path):
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": encode_image_data_uri(local_path), "detail": "high"}
+                }
         except Exception as err:
             logger.warning(f"[Multimodal Assembly] Skipped image {img_source}: {err}")
         return None

@@ -1,7 +1,8 @@
 import math
+
 import numpy as np
-import pytest
-from core.config import DeterministicOfflineEmbeddings
+
+from core.config import DeterministicOfflineEmbeddings, Settings
 
 
 def test_determinism():
@@ -17,6 +18,14 @@ def test_normalization():
     vec = embeddings.embed_query("Query for vector normalization testing.")
     l2_norm = float(np.linalg.norm(vec))
     assert math.isclose(l2_norm, 1.0, rel_tol=1e-5, abs_tol=1e-5)
+
+
+def test_uvicorn_reload_parses_boolean_environment_value(monkeypatch):
+    monkeypatch.setenv("UVICORN_RELOAD", "true")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.uvicorn_reload is True
 
 
 def test_dimensionality():

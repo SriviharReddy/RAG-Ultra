@@ -11,6 +11,13 @@ from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from core.config import get_settings
 
+def encode_image_data_uri(image_path: str) -> str:
+    """Encode a local image as a Base64 data URI using its detected MIME type."""
+    mime_type = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+    with open(image_path, "rb") as image_file:
+        encoded = base64.b64encode(image_file.read()).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
 @tool
 async def vision_ocr_parse(image_source: str) -> str:
     """
@@ -57,10 +64,7 @@ async def vision_ocr_parse(image_source: str) -> str:
     try:
         # Check if local image file or URL
         if os.path.exists(image_source):
-            mime_type = mimetypes.guess_type(image_source)[0] or "image/jpeg"
-            with open(image_source, "rb") as img_file:
-                b64_data = base64.b64encode(img_file.read()).decode("utf-8")
-            image_url_payload = {"url": f"data:{mime_type};base64,{b64_data}"}
+            image_url_payload = {"url": encode_image_data_uri(image_source)}
         else:
             image_url_payload = {"url": image_source}
 

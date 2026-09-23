@@ -6,7 +6,8 @@ import os
 import io
 import argparse
 import asyncio
-from typing import List, Tuple, Dict, Any, Optional
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
 from PIL import Image
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
@@ -18,11 +19,19 @@ from core.config import get_settings
 
 load_dotenv()
 
-def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> List[Tuple[int, str, str, str, bool]]:
+@dataclass(frozen=True, slots=True)
+class PageRecord:
+    page_num: int
+    image_rel_url: str
+    image_disk_path: str
+    native_text: str
+    has_visuals: bool
+
+
+def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> List[PageRecord]:
     """
     Renders each page of a PDF as a normalized JPEG image cached locally.
-    Extracts native text, checks for visual graphics/tables, and returns:
-    List of (page_num, image_rel_url, image_disk_path, native_text, has_visuals).
+    Extracts native text and detects visual graphics/tables for each page.
     """
     settings = get_settings()
     doc_image_dir = os.path.join(settings.image_storage_dir, doc_id)
@@ -65,12 +74,12 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
             or "chart" in native_text.lower()
         )
 
-        page_records.append((page_num, image_rel_url, image_disk_path, native_text, has_visuals))
+        page_records.append(PageRecord(page_num, image_rel_url, image_disk_path, native_text, has_visuals))
 
     pdf_document.close()
     return page_records
 
-def process_markdown_or_text_file(file_path: str, doc_id: str) -> List[Tuple[int, str, str, str, bool]]:
+def process_markdown_or_text_file(file_path: str, doc_id: str) -> List[PageRecord]:
     """Splits plain Markdown/Text file into logical page/section blocks."""
     with open(file_path, "r", encoding="utf-8") as f:
         full_text = f.read()
@@ -88,7 +97,7 @@ def process_markdown_or_text_file(file_path: str, doc_id: str) -> List[Tuple[int
     for idx, page_text in enumerate(pages):
         page_num = idx + 1
         has_visuals = "|" in page_text or "![" in page_text or "Table" in page_text or "Chart" in page_text
-        page_records.append((page_num, "", "", page_text.strip(), has_visuals))
+        page_records.append(PageRecord(page_num, "", "", page_text.strip(), has_visuals))
 
     return page_records
 
@@ -136,11 +145,11 @@ async def ingest_file(
     total_chunks_indexed = 0
 
     for record in page_data:
-        page_num = record[0]
-        image_rel_url = record[1]
-        image_disk_path = record[2]
-        native_text = record[3]
-        has_visuals = record[4]
+        page_num = record.page_num
+        image_rel_url = record.image_rel_url
+        image_disk_path = record.image_disk_path
+        native_text = record.native_text
+        has_visuals = record.has_visuals
 
         logger.info(f"--- Ingesting Page {page_num}/{len(page_data)} ---")
 

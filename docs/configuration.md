@@ -50,6 +50,7 @@ TOP_K=3
 # ==============================================================================
 HOST=0.0.0.0
 PORT=8080
+UVICORN_RELOAD=false
 
 # ==============================================================================
 # Observability & Tracing (LangSmith)
@@ -78,6 +79,7 @@ LANGSMITH_PROJECT=rag-ultra-agent
 | `CHUNK_OVERLAP` | Integer | `100` | Overlap character size between adjacent child chunks. |
 | `TOP_K` | Integer | `3` | Number of chunks to retrieve during vector search. |
 | `PORT` | Integer | `8080` | HTTP port for FastAPI server. |
+| `UVICORN_RELOAD` | Boolean | `false` | Enables the Uvicorn development file watcher and process reload. |
 
 ---
 

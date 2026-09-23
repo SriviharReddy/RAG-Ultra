@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     # Server Configuration
     host: str = "0.0.0.0"
     port: int = 8080
+    uvicorn_reload: bool = False
 
     def ensure_directories(self) -> None:
         """Ensures that required storage directories exist on disk."""

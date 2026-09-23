@@ -1,341 +1,218 @@
-# RAG-Ultra — Comprehensive Code Analysis Report
+# RAG-Ultra — Post-Fix Comprehensive Code Review
 
-## Overview
+## Review Scope
 
-A full audit of the RAG-Ultra repository covering dependency management, CORS configuration, embedding determinism, async/sync correctness, singleton thread safety, test coverage, API design, logging, and documentation consistency.
+This report reviews the four commits after `44301dd68410a7f4992c37b7d692a2747a3ab76a`:
 
-## Issue Summary
+- `db3a04e` — critical audit fixes
+- `f376a9e` — high-severity audit fixes
+- `eac6b55` — medium-severity audit fixes
+- `1e70bf6` — low-severity audit fixes
+
+Diff range:
+
+```text
+git diff 44301dd68410a7f4992c37b7d692a2747a3ab76a...1e70bf667f285766673c45725866f5cdd6ca61b7
+```
+
+The review covered the originating audit requirements, documented architecture and configuration contracts, runtime behavior, tests, packaging, and container startup.
+
+Finding numbers retain their original review identifiers. Standards findings resolved by the accompanying change are listed under **Resolved Since the Previous Audit**.
+
+## Executive Summary
+
+Most original audit items and all identified Standards findings are now implemented. Eight actionable findings remain: two high-severity correctness/security issues, four medium-severity issues, and two low-severity robustness issues.
 
 | Severity | Count |
-|----------|-------|
-| **Critical** | 4 |
-| **High** | 3 |
-| **Medium** | 6 |
-| **Low** | 8 |
-| **Total** | 21 |
+| :--- | ---: |
+| **Critical** | 0 |
+| **High** | 2 |
+| **Medium** | 4 |
+| **Low** | 2 |
+| **Total** | **8** |
 
----
+## High-Severity Issues
 
-## Critical Issues
+### 1. Streaming API responses still disclose raw exception details
 
-### 1. Missing `numpy` as explicit dependency in `pyproject.toml`
-
-**File:** `core/config.py:4` — `import numpy as np`
-
-**Evidence:** `numpy` is imported and used directly in `DeterministicOfflineEmbeddings._embed()` (lines 21-30) for vector normalization (`np.linalg.norm`, `np.zeros`), but it is **not listed** in `pyproject.toml` dependencies. It is only available transitively via `chromadb` → `numpy` and `langchain-chroma` → `numpy`.
-
-**Impact:** If `chromadb` or `langchain-chroma` drop numpy as a direct dependency in a future release, the project breaks with `ModuleNotFoundError`. The dependency is a direct consumer-side requirement, not an implementation detail.
-
-**Fix:** Add `"numpy>=2.0"` to `pyproject.toml`.
-
----
-
-### 2. CORS misconfiguration: `allow_origins=["*"]` with `allow_credentials=True`
-
-**File:** `app.py:33-36`
+**Files:** `app.py:399-400`
 
 ```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    ...
-)
+except Exception as err:
+    yield format_sse("error", {"message": str(err)})
 ```
 
-**Evidence:** Per the ASGI spec and FastAPI documentation, `allow_origins=["*"]` is **incompatible** with `allow_credentials=True`. Browsers silently reject credentialed requests (cookies, `Authorization` headers) when `Access-Control-Allow-Origin: *` is returned.
+**Evidence:** The original information-disclosure fix sanitized the regular query and ingestion endpoints, but the SSE endpoint still sends the complete exception string to the client and does not log the exception server-side.
 
-**Impact:** Any browser-based client requiring authentication or session cookies will fail CORS preflight or actual requests. The `*` wildcard for origins makes the `allow_credentials=True` flag silently a no-op.
+A forced graph failure produced:
 
-**Fix:** Replace `["*"]` with an explicit list of trusted origins (e.g., `["https://your-frontend.com"]`), or set `allow_credentials=False` if cookies are not needed.
+```text
+event: error
+data: {"message": "secret=/srv/private/token.db"}
+```
+
+**Impact:** Internal paths, database names, provider errors, credentials-adjacent messages, and implementation details can be exposed to any client capable of triggering the streaming endpoint.
+
+**Recommended fix:** Log the full exception with `logger.exception(...)`, then emit a fixed generic SSE error payload. Do not include `str(err)` in the response.
 
 ---
 
-### 3. Embeddings are not actually deterministic across processes
+### 2. Existing persisted embeddings are incompatible after the hash algorithm change
 
-**File:** `core/config.py:25` — `h = abs(hash(w)) % self.size`
+**Files:** `core/config.py:26`, `core/config.py:69`, `core/database.py:21-25`
 
-**Evidence:** Python 3's built-in `hash()` for strings is **randomized per process** via `PYTHONHASHSEED`. Confirmed empirically:
+**Evidence:** `DeterministicOfflineEmbeddings` now uses MD5 instead of Python's randomized `hash()`, which fixes determinism for newly created vectors. However, the persisted collection name remains `sota_rag_collection`, and no schema/version marker or migration detects data written with the previous embedding algorithm.
 
+A representative legacy/current vector comparison produced a cosine similarity of `0.0`. Any existing Chroma collection can therefore contain vectors that are incompatible with queries generated after deployment.
+
+**Impact:** Deploying this fix does not restore retrieval for existing offline-embedding collections. The service may remain silently unable to retrieve previously indexed documents until the collection is rebuilt.
+
+**Recommended fix:** Version the collection or embedding schema, detect legacy collections, and rebuild or explicitly migrate them. Document that the migration is destructive if existing vectors cannot be transformed.
+
+## Medium-Severity Issues
+
+### 4. Docker startup reinstalls development dependencies
+
+**Files:** `Dockerfile:14`, `Dockerfile:18`
+
+```dockerfile
+RUN uv sync --frozen --no-dev
+CMD ["uv", "run", "python", "app.py"]
 ```
-Run 1: "hello world test" → non-zero positions at [496, 1089, 1225]
-Run 2: "hello world test" → non-zero positions at [422, 433, 1082]
+
+**Evidence:** The image is built without development dependencies, but plain `uv run` synchronizes the default development group before starting the application. In a clean probe, `pytest` was absent after `uv sync --no-dev` and installed when `uv run` executed; five packages were installed at startup.
+
+**Impact:** Production startup depends on access to development artifacts, mutates the prepared environment, increases image/runtime supply-chain surface, and can fail in a network-restricted deployment.
+
+**Recommended fix:** Start the already-synchronized environment without another dependency sync:
+
+```dockerfile
+CMD ["uv", "run", "--no-sync", "--no-dev", "python", "app.py"]
 ```
 
-The class docstring claims: *"Produces deterministic, normalized term-hashed vectors"* — this is false. The `lru_cache` on `get_settings()` and the singleton `get_database()` mean the embeddings instance persists within one process, but across process restarts (e.g., server reload, container restart), all previously indexed vectors become **inconsistent** with new query embeddings.
-
-**Impact:** Chroma's HNSW index stores embeddings computed with one hash seed. After a process restart, queries use a different seed → same text maps to completely different vectors → **all retrieval fails silently**. The `DeterministicOfflineEmbeddings` fallback path is fundamentally broken for any persistent Chroma database.
-
-**Fix:** Replace `hash(w)` with `hashlib.sha256(w.encode()).hexdigest()` mapped to an integer, or use `zlib.crc32`.
+Alternatively, invoke `.venv/bin/python app.py` directly.
 
 ---
 
-### 4. Synchronous DB write in async ingestion path
+### 5. The embedding regression test does not cover cross-process determinism
 
-**File:** `ingest_cli.py:169`
+**File:** `tests/test_embeddings.py:7-12`
 
 ```python
-db.ingest_hierarchical_document(...)  # synchronous call
+vec1 = embeddings.embed_query(text)
+vec2 = embeddings.embed_query(text)
+assert vec1 == vec2
 ```
 
-**Evidence:** The function `ingest_file()` is `async` (line 91) and calls `await db.similarity_search_with_score_async(...)` correctly for reads (via `asyncio.to_thread`). But for writes, it calls the **synchronous** `ingest_hierarchical_document()` directly instead of the async wrapper `ingest_hierarchical_document_async()` which exists at line 56 and uses `asyncio.to_thread`. Chroma's `add_documents()` is a blocking I/O operation (disk writes, embedding computation).
+**Evidence:** Both calls run in the same process. This test also passes with the original `hash()` implementation because repeated lookups in one process are stable. The actual defect occurred across processes with different `PYTHONHASHSEED` values.
 
-**Impact:** During document ingestion via the API, the event loop is blocked. Concurrent requests to the server stall during index writes. For large documents, this can freeze the server for seconds.
+A manual probe confirmed that the current MD5 implementation produces matching vectors under seeds `1` and `987654`, but the permanent test suite would not catch a regression to process-local hashing.
 
-**Fix:** Change line 169 to `await db.ingest_hierarchical_document_async(...)`.
+**Impact:** The most serious embedding failure can return without failing CI.
+
+**Recommended fix:** Add a subprocess test with at least two explicit `PYTHONHASHSEED` values and compare serialized vectors. A fixed golden vector is another compact option.
 
 ---
 
-## High Issues
+### 6. Standalone CLI ingestion suppresses normal progress logs
 
-### 5. Thread-unsafe singleton `get_database()`
+**Files:** `ingest_cli.py:1-3`, `ingest_cli.py:127-188`
 
-**File:** `core/database.py:140-144`
+**Evidence:** Progress output was changed from `print()` to `logger.info()`, but the standalone CLI does not configure the root logger. Running `ingest_cli.py` directly imports no module that calls `logging.basicConfig()`.
+
+A direct `ingest_cli.logger.info(...)` probe emitted nothing to stdout or stderr.
+
+**Impact:** Successful CLI ingestion appears silent. Operators lose progress, page counts, chunk counts, and fallback visibility unless another application module has configured logging first.
+
+**Recommended fix:** Configure logging once in the CLI entry point or a shared logging helper. Preserve human-readable CLI output while ensuring `INFO` records are emitted.
+
+---
+
+### 8. Ruff is declared but is not an enforceable quality gate
+
+**Files:** `pyproject.toml:23-28`, `tests/test_embeddings.py:1-3`, `tests/test_graph_routing.py:1-2`, `app.py:198`
+
+**Evidence:** Ruff is now a development dependency, but the repository still defines no Ruff policy or passing full-project baseline. The current `uv run ruff check .` reports 149 diagnostics, many of which predate this review range. Focused checks for the files changed by the Standards fixes pass, but the full repository gate remains unavailable.
+
+**Impact:** Declaring Ruff without a clean, repository-local configuration does not provide a reliable development gate. Future quality checks either remain noisy or are not enforced.
+
+**Recommended fix:** Add an explicit `[tool.ruff]` configuration, clean or narrowly baseline existing findings, remove unused imports/bindings, and run the same command in CI.
+
+## Low-Severity Issues
+
+### 9. SSE event type remains stale when an event omits its type
+
+**File:** `demo.py:213-226`
+
+**Evidence:** `event_type` is initialized once before reading the stream and is not reset at event boundaries. Initializing it prevents `UnboundLocalError`, but a later data-only event still inherits the previous event's type.
+
+**Impact:** Demo token rendering and event classification can be incorrect for valid SSE input that omits the optional `event:` field.
+
+**Recommended fix:** Reset `event_type` for each event block, normally when the blank separator line is encountered, and use the SSE default event type when none was supplied.
+
+---
+
+### 10. MD5 introduces an avoidable FIPS compatibility edge
+
+**File:** `core/config.py:26`
 
 ```python
-def get_database() -> SotaRagDatabase:
-    if SotaRagDatabase._instance is None:
-        SotaRagDatabase._instance = SotaRagDatabase()
-    return SotaRagDatabase._instance
+h = int(hashlib.md5(w.encode()).hexdigest(), 16) % self.size
 ```
 
-**Evidence:** Classic check-then-act race condition. FastAPI runs on `asyncio` with potential for concurrent request handling. Multiple coroutines can enter the function simultaneously when `_instance` is `None`, each creating a separate `Chroma` instance. Both instances point to the same `persist_directory` but maintain separate in-memory state.
+**Evidence:** The replacement is deterministic in normal environments, and the reviewed cross-process probe passes. However, the originating audit proposed SHA-256 or CRC32, and MD5 can be unavailable in FIPS-enabled OpenSSL environments when used through `hashlib.md5()` without a non-security marker.
 
-**Impact:** Multiple `Chroma` instances writing to the same persistence directory can cause file locking issues, data corruption, or inconsistent reads. In practice this may be masked by the GIL, but it's not guaranteed.
+**Impact:** Deployment under strict FIPS policy can fail during embedding generation even though cryptography is not required here.
 
-**Fix:** Add `threading.Lock` guarding the singleton creation, or use `asyncio.Lock` if only used in async context.
-
----
-
-### 6. Zero tests in a "production-grade" codebase
-
-**Evidence:** No `test_*.py` files, no `conftest.py`, no `[tool.pytest.ini_options]` in `pyproject.toml`. The entire project has **no automated tests whatsoever**. The only verification mechanism is `demo.py` (a manual end-to-end script).
-
-**Impact:** No regression protection. The "production-grade" claims in README are unsubstantiated. Changes to embedding logic, RAG routing, or database operations can silently break without detection.
-
-**Fix:** Add a test suite with `pytest` (`uv add --dev pytest pytest-asyncio`) and `[tool.pytest.ini_options]` config. Start with tests for `DeterministicOfflineEmbeddings`, `merge_chunks_rrf`, and the graph routing logic.
+**Recommended fix:** Prefer `zlib.crc32(word_bytes)`, or use `hashlib.md5(word_bytes, usedforsecurity=False)` where MD5 is intentionally retained.
 
 ---
 
-### 7. Reliance on Chroma private API `_collection`
-
-**File:** `core/database.py:131`
-
-```python
-return self.vector_db._collection.count()
-```
-
-**Evidence:** `_collection` is a private attribute of the `Chroma` class in `langchain-chroma`. Accessing it directly is fragile — the internal attribute name or structure could change in any minor version bump. The lock file shows `langchain-chroma==1.1.0`, but upstream LangChain frequently renames internal attributes.
-
-**Impact:** A `langchain-chroma` upgrade could break `get_collection_count()` with an `AttributeError`.
-
-**Fix:** Use the public API: replace `self.vector_db._collection.count()` with `len(self.vector_db.get()["ids"])` or check for a public `count` method.
-
----
-
-## Medium Issues
-
-### 8. Hardcoded `image/jpeg` MIME type for all image data URIs
-
-**Files:** `my_agent/utils/nodes.py:274,283,294` and `my_agent/utils/tools.py:88`
-
-**Evidence:** All data URIs are constructed as `"data:image/jpeg;base64,{b64}"` regardless of the actual image format. The ingestion pipeline saves pages as JPEG (confirmed at `ingest_cli.py:44`), so the local path works. But for remote URLs loaded in `load_single_image` (nodes.py:277-284), the response could be PNG, WebP, GIF, etc. — and the MIME type is hardcoded to JPEG.
-
-**Impact:** If a remote image is PNG, the LLM receives a JPEG-labeled data URI for a PNG-encoded image, causing silent OCR/parsing failures or image rendering issues in frontends.
-
-**Fix:** Detect content type from `response.headers["content-type"]` for remote images, or from file extension for local files.
-
----
-
-### 9. Dead code: unused tools and aliases
-
-**Files:** `my_agent/utils/tools.py:10-38,104`
-
-**Evidence:** `vector_search_db` and `vector_search_db_async` are decorated with `@tool` from LangChain, suggesting they were intended for use as agent tools. However, they are **never imported** anywhere — `my_agent/agent.py` and `my_agent/utils/nodes.py` both call `db.similarity_search_with_score_async()` directly instead. The `deepseek_ocr_parse = vision_ocr_parse` alias (line 104) is also never imported by any file.
-
-**Impact:** Confusion about the agent's tool interface. Dead code that must still be maintained.
-
----
-
-### 10. No `[build-system]` in `pyproject.toml`
-
-**File:** `pyproject.toml`
-
-**Evidence:** The file contains only `[project]` with dependencies. There is no `[build-system]` section (no `setuptools`, `hatchling`, or `uv` build backend declared).
-
-**Impact:** `pip install -e .` or `pip install .` will fail or use PEP 517 default isolation with unpredictable results. `uv sync` works because it uses virtual project mode, but any standard Python packaging workflow breaks. Docker builds with `pip install` will fail.
-
-**Fix:** Add a `[build-system]` section. For a uv-managed project:
-```toml
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.uv]
-package = true
-```
-
----
-
-### 11. Internal error details leaked to API callers
-
-**File:** `app.py:192` and `app.py:282`
-
-```python
-raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
-raise HTTPException(status_code=500, detail=f"Error executing agent RAG workflow: {str(e)}")
-```
-
-**Evidence:** Raw exception messages from internal failures are sent directly to the client. These could expose API key errors, internal file paths, Chroma stack traces, or other sensitive information.
-
-**Impact:** Information disclosure security risk.
-
-**Fix:** Log the full error server-side, return a generic message to the client (e.g., `"Internal ingestion failure. Contact support."`). With proper logging infrastructure.
-
----
-
-### 12. `uvicorn.run(reload=True)` hardcoded
-
-**File:** `app.py:405`
-
-```python
-uvicorn.run("app:app", host=settings.host, port=settings.port, reload=True)
-```
-
-**Evidence:** `reload=True` is hardcoded. This enables the file watcher that restarts the server on any `.py` file change. In production, this causes unnecessary restarts, watches files unnecessarily, and the reload subprocess can cause state inconsistencies (the `SotaRagDatabase` singleton and Chroma instance get re-created on each reload).
-
-**Impact:** Production deployment is unreliable and potentially unsafe.
-
-**Fix:** Make reload configurable: `reload=os.getenv("UVICORN_RELOAD", "false").lower() == "true"`.
-
----
-
-### 13. No logging infrastructure — uses `print()` everywhere
-
-**Files:** All Python files
-
-**Evidence:** Every module uses `print()` for diagnostic output (e.g., `app.py:121`, `nodes.py:96`, `ingest_cli.py:30`, `config.py:35`). No `import logging`, no `getLogger()`, no log levels, no structured output.
-
-**Impact:** Cannot configure log levels in production. No way to route errors to monitoring. Print output to stdout is unstructured and difficult to parse. No debug/info/warning/error distinction.
-
-**Fix:** Replace `print()` with `logging.getLogger(__name__)` throughout. Add a `logging.conf` or structured logging setup in `app.py`.
-
----
-
-## Low Issues
-
-### 14. No LICENSE file despite README reference
-
-**File:** `README.md:6` — `[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)`
-
-**Evidence:** The README links to `LICENSE` and claims MIT license, but no `LICENSE` file exists in the repository.
-
-**Impact:** Legal ambiguity. Users cannot verify the license terms.
-
----
-
-### 15. No Dockerfile or docker-compose
-
-**Evidence:** No `Dockerfile`, `docker-compose.yml`, or `.dockerignore` files exist. The README and docs describe running with `uv run python app.py` but provide no container deployment story.
-
-**Impact:** No reproducible deployment environment. Inconsistent behavior between local dev and production.
-
----
-
-### 16. Docstring mismatch: return type documented incorrectly
-
-**File:** `ingest_cli.py:17-22`
-
-```python
-def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> List[Tuple[int, str, str, bool]]:
-    """
-    ...
-    List of (page_num, image_rel_path, native_text, has_visuals).
-    """
-```
-
-**Evidence:** The return type annotation says `List[Tuple[int, str, str, bool]]` (4 elements) and the docstring lists 4 elements. But the actual return (line 64) is a **5-tuple**: `(page_num, image_rel_url, image_disk_path, native_text, has_visuals)`.
-
-**Impact:** Misleads developers and type checkers about the return shape.
-
----
-
-### 17. Unnecessary `langchain` meta-package dependency
-
-**File:** `pyproject.toml:8`
-
-**Evidence:** `"langchain>=1.3.1"` is listed as a direct dependency. However, no code in the project imports from `langchain` directly — it uses `langchain_core`, `langchain_openai`, `langchain_chroma`, and `langchain_text_splitters`. The `langchain` package is a meta-package that pulls in many submodules the project doesn't use.
-
-**Impact:** Slightly larger dependency tree. Not harmful but unnecessary.
-
----
-
-### 18. No dev dependencies declared in `pyproject.toml`
-
-**File:** `pyproject.toml`
-
-**Evidence:** No `[project.optional-dependencies]` or `[tool.uv.dev-dependencies]` section. No test, lint, or type-checking tools are declared. The project has no `ruff`, `mypy`, `pytest`, or `pre-commit` configuration.
-
-**Impact:** Inconsistent development environments. No code quality gates.
-
----
-
-### 19. `get_embeddings()` not cached — creates new instances
-
-**File:** `core/config.py:119-133`
-
-**Evidence:** `get_embeddings()` is not decorated with `@lru_cache`. Each call creates a new `OpenAIEmbeddings` or `DeterministicOfflineEmbeddings` instance. While the singleton `SotaRagDatabase` is only constructed once (via `get_database()`), any other caller of `get_embeddings()` creates a new instance.
-
-**Impact:** Minor memory waste. If multiple components call `get_embeddings()` independently, they get separate embedding model instances.
-
----
-
-### 20. Fragile SSE event parsing in `demo.py`
-
-**File:** `demo.py:216-232`
-
-```python
-if "token" in event_type or "chunk" in data_obj:
-```
-
-**Evidence:** `event_type` is only set when a line starts with `"event: "`. If the first line of an event block is `data:` (which shouldn't happen with the current `format_sse` but is fragile), `event_type` would be either undefined (`UnboundLocalError`) or retain a stale value from the previous event.
-
-**Impact:** Low — the `format_sse` function always emits `event:` before `data:`, so this works in practice. But it's not robust to SSE spec compliance where `event:` could be omitted.
-
----
-
-## Summary Table
-
-| # | Severity | File(s) | Issue |
-|---|----------|---------|-------|
-| 1 | Critical | `pyproject.toml`, `core/config.py` | Missing `numpy` explicit dependency |
-| 2 | Critical | `app.py:33-36` | CORS: `allow_origins=["*"]` + `allow_credentials=True` contradiction |
-| 3 | Critical | `core/config.py:25` | `hash()` not deterministic across processes — breaks persisted Chroma DB |
-| 4 | Critical | `ingest_cli.py:169` | Sync DB write in async path blocks event loop |
-| 5 | High | `core/database.py:140-144` | Thread-unsafe singleton race condition |
-| 6 | High | (project-wide) | Zero tests despite "production-grade" claims |
-| 7 | High | `core/database.py:131` | Uses private Chroma API `_collection` |
-| 8 | Medium | `nodes.py:274,283,294`; `tools.py:88` | Hardcoded `image/jpeg` MIME type for all images |
-| 9 | Medium | `my_agent/utils/tools.py:10-38,104` | Dead code: unused tools and aliases |
-| 10 | Medium | `pyproject.toml` | No `[build-system]` — breaks standard packaging |
-| 11 | Medium | `app.py:192,282` | Internal error details leaked to API clients |
-| 12 | Medium | `app.py:405` | `reload=True` hardcoded for production |
-| 13 | Medium | (all files) | No logging infrastructure — uses `print()` |
-| 14 | Low | `README.md:6` | LICENSE file referenced but missing |
-| 15 | Low | (project-wide) | No Dockerfile / docker-compose |
-| 16 | Low | `ingest_cli.py:17-22` | Docstring says 4-tuple, code returns 5-tuple |
-| 17 | Low | `pyproject.toml:8` | Unnecessary `langchain` meta-package dependency |
-| 18 | Low | `pyproject.toml` | No dev dependencies or tooling config |
-| 19 | Low | `core/config.py:119` | `get_embeddings()` not cached |
-| 20 | Low | `demo.py:225` | Fragile SSE event type parsing |
-
----
+## Verification Performed
+
+| Check | Result |
+| :--- | :--- |
+| `uv run pytest -q` | **22 passed** |
+| `uv lock --check` | Lockfile consistent; 131 packages resolved |
+| `uv build` | Wheel and source distribution built successfully |
+| Cross-process embedding probe | Matching vectors under different `PYTHONHASHSEED` values |
+| Identifier-only Chroma count smoke | Passed with `count=2` and `include=[]` |
+| Forced SSE failure probe | Confirmed raw exception disclosure |
+| Container startup probe | Confirmed plain `uv run` installs dev dependencies |
+| Standalone CLI logging probe | Confirmed `INFO` messages are suppressed |
+| `uv run ruff check .` | Failed; 149 diagnostics, including pre-existing debt |
+| Docker Compose/image build | Not run because `docker` is unavailable in the environment |
+
+## Resolved Since the Previous Audit
+
+The following original findings were substantially implemented:
+
+- Explicit `numpy` dependency
+- CORS credential/origin contradiction
+- Deterministic embeddings for newly created vectors
+- Async Chroma ingestion write
+- Thread-safe database singleton creation
+- Initial pytest suite and async test configuration
+- Identifier-only public Chroma collection count
+- Dynamic MIME detection for normal remote/local image paths
+- Shared local image data-URI encoder across OCR and multimodal assembly
+- Dead vector-search tools and alias removal
+- Hatch build backend and wheel package selection
+- Sanitization for regular query and ingestion error responses
+- `UVICORN_RELOAD` integrated into Pydantic Settings and documented
+- Logging migration, although standalone CLI configuration is incomplete
+- MIT license
+- Docker and Compose files, although container startup needs correction
+- Named immutable `PageRecord` ingestion contract
+- Removal of the `langchain` meta-package
+- Test, async-test, and Ruff development dependencies
+- Cached embedding factory
+- Initial SSE parser initialization
 
 ## Priority Recommendations
 
-1. **Fix #3 (non-deterministic embeddings)** — silently breaks all retrieval across process restarts
-2. **Fix #1 (missing numpy dependency)** — causes `ImportError` on clean installs
-3. **Fix #2 (CORS misconfiguration)** — breaks browser clients with credentials
-4. **Fix #4 (sync DB write in async path)** — blocks event loop during ingestion
-5. **Fix #5 (thread-unsafe singleton)** — race condition under concurrent requests
-6. **Add tests (#6)** — no regression protection for a "production-grade" service
+1. Sanitize and server-log streaming endpoint failures.
+2. Add a legacy embedding-index detection and rebuild/migration path.
+3. Prevent `uv run` from installing development dependencies during container startup.
+4. Add a true cross-process embedding regression test, configure standalone CLI logging, and establish a Ruff gate.
+5. Reset SSE event state per event and replace or explicitly mark the MD5 embedding hash as non-security use.

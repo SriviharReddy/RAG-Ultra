@@ -129,7 +129,7 @@ class SotaRagDatabase:
     def get_collection_count(self) -> int:
         """Returns the total number of indexed chunk records."""
         try:
-            return len(self.vector_db.get()['ids'])
+            return len(self.vector_db.get(include=[])["ids"])
         except Exception:
             return 0
 
