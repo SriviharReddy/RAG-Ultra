@@ -117,6 +117,7 @@ def get_generation_llm(temperature: float = 0.1, **kwargs) -> ChatOpenAI:
         llm_kwargs["base_url"] = settings.openai_base_url
     return ChatOpenAI(**llm_kwargs)
 
+@lru_cache(maxsize=1)
 def get_embeddings() -> Embeddings:
     """Returns the embedding model instance."""
     settings = get_settings()

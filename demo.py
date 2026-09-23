@@ -211,6 +211,7 @@ async def run_end_to_end_demo():
             "chat_history": []
         }
         event_count = 0
+        event_type = ""
         async with client.stream("POST", "/api/v1/query/stream", json=stream_payload) as stream_resp:
             print(f"{GREEN}[✓] SSE Stream Connected! (Status {stream_resp.status_code}){RESET}")
             async for line in stream_resp.aiter_lines():

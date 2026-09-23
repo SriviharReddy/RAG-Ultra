@@ -18,11 +18,11 @@ from core.config import get_settings
 
 load_dotenv()
 
-def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> List[Tuple[int, str, str, bool]]:
+def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> List[Tuple[int, str, str, str, bool]]:
     """
     Renders each page of a PDF as a normalized JPEG image cached locally.
     Extracts native text, checks for visual graphics/tables, and returns:
-    List of (page_num, image_rel_path, native_text, has_visuals).
+    List of (page_num, image_rel_url, image_disk_path, native_text, has_visuals).
     """
     settings = get_settings()
     doc_image_dir = os.path.join(settings.image_storage_dir, doc_id)

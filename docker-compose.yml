@@ -1,0 +1,13 @@
+services:
+  rag-ultra:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - db_storage:/app/db_storage
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  db_storage:
