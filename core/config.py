@@ -1,4 +1,5 @@
 import os
+import hashlib
 from functools import lru_cache
 from typing import Optional, List
 import numpy as np
@@ -22,7 +23,7 @@ class DeterministicOfflineEmbeddings(Embeddings):
         words = text.lower().replace("\n", " ").replace("|", " ").replace("-", " ").split()
         for w in words:
             if w:
-                h = abs(hash(w)) % self.size
+                h = int(hashlib.md5(w.encode()).hexdigest(), 16) % self.size
                 vec[h] += 1.0
         norm = np.linalg.norm(vec)
         if norm > 0:

@@ -166,7 +166,7 @@ async def ingest_file(
         print(f"[Ingest Engine] Split into {len(child_chunks)} layout-aware chunks.")
 
         # Step 5: Hierarchical indexing with parent payload
-        db.ingest_hierarchical_document(
+        await db.ingest_hierarchical_document_async(
             parent_text=page_markdown,
             child_chunks=child_chunks,
             context_prefix=context_prefix,
