@@ -4,6 +4,7 @@ import json
 import uuid
 import tempfile
 import asyncio
+import logging
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,12 @@ from core.config import get_settings, get_fast_llm
 from core.database import get_database
 from ingest_cli import ingest_file
 from my_agent.agent import graph
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
 
 load_dotenv()
 settings = get_settings()
@@ -118,10 +125,10 @@ Standalone Question:"""
         fast_llm = get_fast_llm(temperature=0.0)
         response = await fast_llm.ainvoke([HumanMessage(content=prompt)])
         condensed = str(response.content).strip()
-        print(f"[Query Condenser] Raw: '{query}' -> Condensed: '{condensed}'")
+        logger.info(f"[Query Condenser] Raw: '{query}' -> Condensed: '{condensed}'")
         return condensed
     except Exception as e:
-        print(f"[Query Condenser Fallback] Using raw query due to: {e}")
+        logger.warning(f"[Query Condenser Fallback] Using raw query due to: {e}")
         return query
 
 # --- REST Endpoints ---
@@ -189,7 +196,8 @@ async def ingest_document_file(
             message=f"Successfully indexed document '{filename}' with {stats.get('total_chunks_indexed', 0)} chunks."
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+        logger.exception("Ingestion failed for '%s'", filename)
+        raise HTTPException(status_code=500, detail="Internal ingestion failure. Check server logs for details.")
     finally:
         if os.path.exists(temp_path):
             try:
@@ -277,9 +285,10 @@ async def query_rag_agent(request: QueryRequest):
             metadata=metadata
         )
     except Exception as e:
+        logger.exception("RAG workflow failed for query: '%s'", request.query)
         raise HTTPException(
             status_code=500,
-            detail=f"Error executing agent RAG workflow: {str(e)}"
+            detail="Internal error processing query. Check server logs for details."
         )
 
 @app.post("/api/v1/query/stream")
@@ -402,4 +411,4 @@ async def query_rag_agent_stream(request: QueryRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host=settings.host, port=settings.port, reload=True)
+    uvicorn.run("app:app", host=settings.host, port=settings.port, reload=os.getenv("UVICORN_RELOAD", "false").lower() == "true")

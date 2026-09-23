@@ -1,6 +1,11 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 import os
 import base64
 import asyncio
+import mimetypes
 from typing import Dict, Any, List, Optional
 import httpx
 from pydantic import BaseModel, Field
@@ -90,10 +95,10 @@ async def retrieve_node(state: AgentState) -> Dict[str, Any]:
     # Determine query: Use expanded query if available from previous judge critique
     if retry_count > 0 and state.get("expanded_query"):
         search_query = state["expanded_query"]
-        print(f"[Retrieve Node] Executing expanded search query (Retry {retry_count}): '{search_query}'")
+        logger.info(f"[Retrieve Node] Executing expanded search query (Retry {retry_count}): '{search_query}'")
     else:
         search_query = state.get("condensed_query") or state.get("query", "")
-        print(f"[Retrieve Node] Executing search query: '{search_query}'")
+        logger.info(f"[Retrieve Node] Executing search query: '{search_query}'")
 
     metadata_filter = state.get("metadata_filter")
     raw_results = await db.similarity_search_with_score_async(
@@ -115,10 +120,10 @@ async def retrieve_node(state: AgentState) -> Dict[str, Any]:
     existing_chunks = state.get("retrieved_chunks", [])
     if existing_chunks:
         merged_chunks = merge_chunks_rrf(existing_chunks, new_chunks, top_n=settings.top_k + 1)
-        print(f"[Retrieve Node] RRF merged {len(existing_chunks)} prior chunks + {len(new_chunks)} new chunks -> {len(merged_chunks)} unique chunks.")
+        logger.info(f"[Retrieve Node] RRF merged {len(existing_chunks)} prior chunks + {len(new_chunks)} new chunks -> {len(merged_chunks)} unique chunks.")
     else:
         merged_chunks = new_chunks
-        print(f"[Retrieve Node] Retrieved {len(merged_chunks)} initial chunks.")
+        logger.info(f"[Retrieve Node] Retrieved {len(merged_chunks)} initial chunks.")
 
     return {
         "retrieved_chunks": merged_chunks,
@@ -155,7 +160,7 @@ async def evaluate_relevance_node(state: AgentState) -> Dict[str, Any]:
     # High-confidence fast-path: Bypass judge LLM when top chunk has high relevance
     top_chunk_score = chunks[0].get("score")
     if top_chunk_score is not None and top_chunk_score >= 0.82:
-        print(f"[Judge Fast-Path] Top chunk score ({top_chunk_score:.3f} >= 0.82) indicates high confidence. Bypassing judge LLM.")
+        logger.info(f"[Judge Fast-Path] Top chunk score ({top_chunk_score:.3f} >= 0.82) indicates high confidence. Bypassing judge LLM.")
         return {
             "is_relevant": True,
             "critique": f"High confidence similarity match (Score: {top_chunk_score:.3f}).",
@@ -190,9 +195,9 @@ Provide an objective assessment:
         is_relevant = evaluation.is_relevant
         critique = evaluation.critique
         expanded_query = evaluation.expanded_query
-        print(f"[Judge Evaluation] Relevant: {is_relevant} | Critique: {critique}")
+        logger.info(f"[Judge Evaluation] Relevant: {is_relevant} | Critique: {critique}")
     except Exception as e:
-        print(f"[Judge Evaluation Warning] Structured output unavailable/failed ({e}). Running heuristic grading.")
+        logger.warning(f"[Judge Evaluation Warning] Structured output unavailable/failed ({e}). Running heuristic grading.")
         # Heuristic fallback: check keyword presence
         query_words = set(query.lower().split())
         context_words = set(contexts_text.lower().split())
@@ -267,41 +272,44 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
     async def load_single_image(cid: int, img_source: str) -> Optional[Dict[str, Any]]:
         try:
             if os.path.exists(img_source):
+                mime_type = mimetypes.guess_type(img_source)[0] or "image/jpeg"
                 with open(img_source, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
                 return {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
+                    "image_url": {"url": f"data:{mime_type};base64,{b64}", "detail": "high"}
                 }
             elif img_source.startswith("http://") or img_source.startswith("https://"):
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.get(img_source)
                     if resp.status_code == 200:
+                        mime_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
                         b64 = base64.b64encode(resp.content).decode("utf-8")
                         return {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
+                            "image_url": {"url": f"data:{mime_type};base64,{b64}", "detail": "high"}
                         }
             elif img_source.startswith("/static/images/"):
                 # Map static URL to local storage directory
                 rel_path = img_source.replace("/static/images/", "")
                 local_path = os.path.join(settings.image_storage_dir, rel_path)
                 if os.path.exists(local_path):
+                    mime_type = mimetypes.guess_type(local_path)[0] or "image/jpeg"
                     with open(local_path, "rb") as f:
                         b64 = base64.b64encode(f.read()).decode("utf-8")
                     return {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
+                        "image_url": {"url": f"data:{mime_type};base64,{b64}", "detail": "high"}
                     }
         except Exception as err:
-            print(f"[Multimodal Assembly] Skipped image {img_source}: {err}")
+            logger.warning(f"[Multimodal Assembly] Skipped image {img_source}: {err}")
         return None
 
     loaded_images = []
     if image_tasks:
         results = await asyncio.gather(*[load_single_image(cid, src) for cid, src in image_tasks])
         loaded_images = [img for img in results if img is not None]
-        print(f"[Multimodal Assembly] Concurrently loaded {len(loaded_images)} visual page images.")
+        logger.info(f"[Multimodal Assembly] Concurrently loaded {len(loaded_images)} visual page images.")
 
     # Formulate generation messages
     system_instruction = (
@@ -340,9 +348,9 @@ async def generate_response_node(state: AgentState) -> Dict[str, Any]:
         gen_llm = get_generation_llm(temperature=0.1)
         response = await gen_llm.ainvoke(llm_inputs)
         answer = str(response.content).strip()
-        print(f"[Generate Node] Synthesized response ({len(answer)} chars).")
+        logger.info(f"[Generate Node] Synthesized response ({len(answer)} chars).")
     except Exception as e:
-        print(f"[Generate Node Warning] Flagship LLM invocation failed ({e}), generating deterministic synthesis.")
+        logger.warning(f"[Generate Node Warning] Flagship LLM invocation failed ({e}), generating deterministic synthesis.")
         # Fallback local synthesis from chunks and citations
         chunks = state.get("retrieved_chunks", [])
         if chunks:
@@ -390,9 +398,9 @@ Determine:
         is_grounded = eval_result.is_grounded
         groundedness_score = eval_result.groundedness_score
         critique = eval_result.critique
-        print(f"[Groundedness Verifier] Score: {groundedness_score} | Grounded: {is_grounded} | Critique: {critique}")
+        logger.info(f"[Groundedness Verifier] Score: {groundedness_score} | Grounded: {is_grounded} | Critique: {critique}")
     except Exception as e:
-        print(f"[Groundedness Verifier Warning] Structured verification skipped ({e}), accepting response as grounded.")
+        logger.warning(f"[Groundedness Verifier Warning] Structured verification skipped ({e}), accepting response as grounded.")
         is_grounded = True
         groundedness_score = 1.0
         critique = "Verified with default groundedness."
@@ -400,7 +408,7 @@ Determine:
     if is_grounded or retry_count >= settings.max_retries:
         route_decision = "end"
     else:
-        print(f"[Groundedness Verifier] Answer ungrounded, initiating corrective retrieval loop (Attempt {retry_count + 1})...")
+        logger.warning(f"[Groundedness Verifier] Answer ungrounded, initiating corrective retrieval loop (Attempt {retry_count + 1})...")
         route_decision = "retrieve"
         retry_count += 1
 

@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 import os
 import io
 import argparse
@@ -27,7 +31,7 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
     page_records = []
     pdf_document = pymupdf.open(pdf_path)
     total_pages = len(pdf_document)
-    print(f"[Ingestion] Rendering '{pdf_path}' ({total_pages} pages) to local image storage...")
+    logger.info(f"[Ingestion] Rendering '{pdf_path}' ({total_pages} pages) to local image storage...")
 
     for page_idx in range(total_pages):
         page_num = page_idx + 1
@@ -120,9 +124,9 @@ async def ingest_file(
     file_ext = os.path.splitext(file_path)[1].lower()
     doc_summary = f"Parsed technical document: '{filename}' (ID: {document_id})."
 
-    print("\n========================================================")
-    print(f"[Ingest Engine] Starting ingestion for '{filename}'...")
-    print("========================================================")
+    logger.info("========================================================")
+    logger.info(f"[Ingest Engine] Starting ingestion for '{filename}'...")
+    logger.info("========================================================")
 
     if file_ext == ".pdf":
         page_data = render_and_cache_pdf_pages(file_path, document_id)
@@ -138,32 +142,32 @@ async def ingest_file(
         native_text = record[3]
         has_visuals = record[4]
 
-        print(f"\n--- Ingesting Page {page_num}/{len(page_data)} ---")
+        logger.info(f"--- Ingesting Page {page_num}/{len(page_data)} ---")
 
         # Step 2: Attempt OCR if local disk image is available, else native text fallback
         page_markdown = ""
         if image_disk_path and os.path.exists(image_disk_path):
-            print(f"[Ingest Engine] Trying Vision OCR for page {page_num}...")
+            logger.info(f"[Ingest Engine] Trying Vision OCR for page {page_num}...")
             ocr_result = await vision_ocr_parse.ainvoke({"image_source": image_disk_path})
             if ocr_result and len(ocr_result.strip()) > 20:
                 page_markdown = ocr_result.strip()
-                print(f"[Ingest Engine] Vision OCR succeeded ({len(page_markdown)} chars).")
+                logger.info(f"[Ingest Engine] Vision OCR succeeded ({len(page_markdown)} chars).")
 
         if not page_markdown:
-            print(f"[Ingest Engine] Using native layout text ({len(native_text)} chars).")
+            logger.info(f"[Ingest Engine] Using native layout text ({len(native_text)} chars).")
             page_markdown = native_text or f"Page {page_num} content from {filename}."
 
         # Step 3: Contextual Retrieval prefix
-        print("[Ingest Engine] Generating Contextual prefix...")
+        logger.info("[Ingest Engine] Generating Contextual prefix...")
         context_prefix = await enricher.generate_page_prefix(doc_summary, page_markdown[:1500], page_num=page_num)
-        print(f"[Ingest Engine] Prefix: \"{context_prefix}\"")
+        logger.info(f"[Ingest Engine] Prefix: \"{context_prefix}\"")
 
         # Step 4: Recursive Markdown chunking
         child_chunks = splitter.split_text(page_markdown)
         if not child_chunks:
             child_chunks = [page_markdown]
 
-        print(f"[Ingest Engine] Split into {len(child_chunks)} layout-aware chunks.")
+        logger.info(f"[Ingest Engine] Split into {len(child_chunks)} layout-aware chunks.")
 
         # Step 5: Hierarchical indexing with parent payload
         await db.ingest_hierarchical_document_async(
@@ -181,7 +185,7 @@ async def ingest_file(
         )
         total_chunks_indexed += len(child_chunks)
 
-    print(f"\n[Ingest Engine] Ingestion complete: {len(page_data)} pages, {total_chunks_indexed} chunks indexed.")
+    logger.info(f"[Ingest Engine] Ingestion complete: {len(page_data)} pages, {total_chunks_indexed} chunks indexed.")
     return {
         "status": "success",
         "doc_id": document_id,
@@ -199,7 +203,7 @@ def main():
     args = parser.parse_args()
 
     if not os.path.exists(args.file_path):
-        print(f"Error: File '{args.file_path}' does not exist.")
+        logger.error(f"Error: File '{args.file_path}' does not exist.")
         exit(1)
 
     asyncio.run(ingest_file(

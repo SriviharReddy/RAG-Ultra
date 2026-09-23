@@ -2284,7 +2284,7 @@ wheels = [
 [[package]]
 name = "rag-ultra"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fastapi", extra = ["all"] },
     { name = "httpx" },
