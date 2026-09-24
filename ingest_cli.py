@@ -1,13 +1,11 @@
-import logging
-
-logger = logging.getLogger(__name__)
-
 import argparse
 import asyncio
 import io
+import logging
 import os
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
@@ -19,7 +17,8 @@ from core.contextualizer import ContextualRetrievalEnricher
 from core.database import get_database
 from my_agent.utils.tools import vision_ocr_parse
 
-load_dotenv()
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class PageRecord:
@@ -30,7 +29,7 @@ class PageRecord:
     has_visuals: bool
 
 
-def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> List[PageRecord]:
+def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> list[PageRecord]:
     """
     Renders each page of a PDF as a normalized JPEG image cached locally.
     Extracts native text and detects visual graphics/tables for each page.
@@ -67,13 +66,15 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
         # 3. Detect visual components (embedded raster images, vector drawings, tables)
         embedded_images = page.get_images()
         drawings = page.get_drawings()
+        # Detect visual components: embedded raster images, significant vector drawings,
+        # or structured data patterns (not just keyword mentions)
+        text_lower = native_text.lower()
         has_visuals = (
             len(embedded_images) > 0
-            or len(drawings) > 2
-            or "table" in native_text.lower()
-            or "|" in native_text
-            or "figure" in native_text.lower()
-            or "chart" in native_text.lower()
+            or len(drawings) > 5  # Raise threshold: >2 catches simple underlines
+            or bool(re.search(r'\|\s*\w+.*\|\s*\w+.*\|', native_text))  # Actual table rows
+            or bool(re.search(r'\bfigure\s+\d', text_lower))  # "Figure 1", not "figure out"
+            or bool(re.search(r'\bchart\s+\d', text_lower))   # "Chart 2", not "chart a course"
         )
 
         page_records.append(PageRecord(page_num, image_rel_url, image_disk_path, native_text, has_visuals))
@@ -81,9 +82,9 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
     pdf_document.close()
     return page_records
 
-def process_markdown_or_text_file(file_path: str, doc_id: str) -> List[PageRecord]:
+def process_markdown_or_text_file(file_path: str, doc_id: str) -> list[PageRecord]:
     """Splits plain Markdown/Text file into logical page/section blocks."""
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open(file_path, encoding="utf-8") as f:
         full_text = f.read()
 
     # Split on explicit markdown page breaks or headers if available
@@ -106,9 +107,9 @@ def process_markdown_or_text_file(file_path: str, doc_id: str) -> List[PageRecor
 async def ingest_file(
     file_path: str,
     document_id: str = "doc_001",
-    chunk_size: Optional[int] = None,
-    chunk_overlap: Optional[int] = None
-) -> Dict[str, Any]:
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None
+) -> dict[str, Any]:
     """
     Layout-aware ingestion pipeline:
     1. Page normalization & local image caching
@@ -206,6 +207,7 @@ async def ingest_file(
     }
 
 def main():
+    load_dotenv()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",

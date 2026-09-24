@@ -1,17 +1,16 @@
-import logging
-
-logger = logging.getLogger(__name__)
-
 import base64
+import logging
 import mimetypes
 import os
-from typing import Any, Dict
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 from core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def encode_image_data_uri(image_path: str) -> str:
@@ -31,7 +30,7 @@ async def vision_ocr_parse(image_source: str) -> str:
     settings = get_settings()
 
     # Determine active Vision/OCR provider
-    ocr_client_kwargs: Dict[str, Any] = {}
+    ocr_client_kwargs: dict[str, Any] = {}
     provider_name = ""
 
     if settings.novita_api_key:

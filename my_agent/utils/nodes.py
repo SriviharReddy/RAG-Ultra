@@ -1,11 +1,9 @@
-import logging
-
-logger = logging.getLogger(__name__)
-
 import asyncio
 import base64
+import hashlib
+import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -16,6 +14,8 @@ from core.database import get_database
 from my_agent.utils.state import AgentState, Citation, DocumentChunk
 from my_agent.utils.tools import encode_image_data_uri
 
+logger = logging.getLogger(__name__)
+
 # --- Pydantic Schemas for Structured LLM-as-a-Judge ---
 
 class GradeEvaluation(BaseModel):
@@ -25,7 +25,7 @@ class GradeEvaluation(BaseModel):
     critique: str = Field(
         description="Brief justification of what information is present, missing, or why retrieval needs adjustment."
     )
-    expanded_query: Optional[str] = Field(
+    expanded_query: str | None = Field(
         default=None,
         description="A refined, search-optimized query with synonymous keywords if current context is insufficient."
     )
@@ -44,24 +44,24 @@ class GroundednessEvaluation(BaseModel):
 # --- Reciprocal Rank Fusion & Deduplication Helper ---
 
 def merge_chunks_rrf(
-    existing_chunks: List[DocumentChunk],
-    new_chunks: List[DocumentChunk],
+    existing_chunks: list[DocumentChunk],
+    new_chunks: list[DocumentChunk],
     k: int = 60,
     top_n: int = 4
-) -> List[DocumentChunk]:
+) -> list[DocumentChunk]:
     """
     Merges prior retrieval hits with newly expanded search results using
     Reciprocal Rank Fusion (RRF) and content deduplication.
     """
-    scores: Dict[str, float] = {}
-    chunk_map: Dict[str, DocumentChunk] = {}
+    scores: dict[str, float] = {}
+    chunk_map: dict[str, DocumentChunk] = {}
 
     def get_chunk_key(c: DocumentChunk) -> str:
         meta = c.get("metadata", {})
         source = meta.get("source", "")
         page = meta.get("page", "")
         idx = meta.get("chunk_index", "")
-        content_hash = str(hash(c.get("content", "")))[:12]
+        content_hash = hashlib.md5(c.get("content", "").encode(), usedforsecurity=False).hexdigest()[:12]
         return f"{source}:{page}:{idx}:{content_hash}"
 
     for rank, chunk in enumerate(existing_chunks):
@@ -75,7 +75,7 @@ def merge_chunks_rrf(
         scores[key] = scores.get(key, 0.0) + (1.0 / (k + rank + 1))
 
     sorted_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
-    merged: List[DocumentChunk] = []
+    merged: list[DocumentChunk] = []
     for key in sorted_keys[:top_n]:
         item = chunk_map[key]
         item["score"] = float(scores[key])
@@ -85,7 +85,7 @@ def merge_chunks_rrf(
 
 # --- Graph Node Implementations ---
 
-async def retrieve_node(state: AgentState) -> Dict[str, Any]:
+async def retrieve_node(state: AgentState) -> dict[str, Any]:
     """
     Retrieves relevant document chunks from Chroma.
     Supports query expansion on retries, metadata filtering, and RRF result merging.
@@ -109,7 +109,7 @@ async def retrieve_node(state: AgentState) -> Dict[str, Any]:
         metadata_filter=metadata_filter
     )
 
-    new_chunks: List[DocumentChunk] = []
+    new_chunks: list[DocumentChunk] = []
     for doc, score in raw_results:
         parent_text = doc.metadata.get("parent_content", doc.page_content)
         chunk = DocumentChunk(
@@ -132,7 +132,7 @@ async def retrieve_node(state: AgentState) -> Dict[str, Any]:
         "query": search_query
     }
 
-async def evaluate_relevance_node(state: AgentState) -> Dict[str, Any]:
+async def evaluate_relevance_node(state: AgentState) -> dict[str, Any]:
     """
     LLM-as-a-Judge node with structured Pydantic output.
     Assesses context relevance and completeness, triggering corrective query expansion if needed.
@@ -161,11 +161,11 @@ async def evaluate_relevance_node(state: AgentState) -> Dict[str, Any]:
 
     # High-confidence fast-path: Bypass judge LLM when top chunk has high relevance
     top_chunk_score = chunks[0].get("score")
-    if top_chunk_score is not None and top_chunk_score >= 0.82:
-        logger.info(f"[Judge Fast-Path] Top chunk score ({top_chunk_score:.3f} >= 0.82) indicates high confidence. Bypassing judge LLM.")
+    if top_chunk_score is not None and top_chunk_score <= 0.3:
+        logger.info(f"[Judge Fast-Path] Top chunk score (distance {top_chunk_score:.3f} <= 0.3) indicates high confidence. Bypassing judge LLM.")
         return {
             "is_relevant": True,
-            "critique": f"High confidence similarity match (Score: {top_chunk_score:.3f}).",
+            "critique": f"Low distance match (Score: {top_chunk_score:.3f}).",
             "expanded_query": None,
             "route_decision": "assemble",
             "retry_count": retry_count
@@ -223,7 +223,7 @@ Provide an objective assessment:
         "retry_count": retry_count
     }
 
-async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
+async def assemble_multimodal_context_node(state: AgentState) -> dict[str, Any]:
     """
     Assembles multimodal context payloads:
     1. Deduplicates parent markdown and numbered citation blocks.
@@ -235,8 +235,8 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
     chunks = state.get("retrieved_chunks", [])
     settings = get_settings()
 
-    citations: List[Citation] = []
-    text_context_blocks: List[str] = []
+    citations: list[Citation] = []
+    text_context_blocks: list[str] = []
     image_tasks = []
     seen_images = set()
 
@@ -271,7 +271,7 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
             image_tasks.append((citation_id, candidate_image))
 
     # Concurrently load images
-    async def load_single_image(cid: int, img_source: str) -> Optional[Dict[str, Any]]:
+    async def load_single_image(cid: int, img_source: str) -> dict[str, Any] | None:
         try:
             if img_source.startswith("http://") or img_source.startswith("https://"):
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -323,7 +323,7 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
         "Generate a comprehensive, structured response with inline citations [^N]."
     )
 
-    llm_payload: List[Dict[str, Any]] = [{"type": "text", "text": user_prompt_text}]
+    llm_payload: list[dict[str, Any]] = [{"type": "text", "text": user_prompt_text}]
     for img_item in loaded_images:
         llm_payload.append(img_item)
 
@@ -336,7 +336,7 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
         "route_decision": "generate"
     }
 
-async def generate_response_node(state: AgentState) -> Dict[str, Any]:
+async def generate_response_node(state: AgentState) -> dict[str, Any]:
     """
     Invokes the multimodal generation model to synthesize a grounded answer.
     """
@@ -361,7 +361,7 @@ async def generate_response_node(state: AgentState) -> Dict[str, Any]:
         "route_decision": "verify"
     }
 
-async def verify_groundedness_node(state: AgentState) -> Dict[str, Any]:
+async def verify_groundedness_node(state: AgentState) -> dict[str, Any]:
     """
     Self-Correction Node: Checks if the generated answer contains ungrounded claims or hallucinations.
     If ungrounded and retries remain, triggers loopback to retrieve node.

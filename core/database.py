@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import chromadb
 from langchain_chroma import Chroma
@@ -20,7 +20,7 @@ class SotaRagDatabase:
     """
     _instance: Optional["SotaRagDatabase"] = None
 
-    def __init__(self, persist_dir: Optional[str] = None, collection_name: Optional[str] = None):
+    def __init__(self, persist_dir: str | None = None, collection_name: str | None = None):
         settings = get_settings()
         self.persist_dir = persist_dir or settings.persist_dir
         self.collection_name = collection_name or settings.collection_name
@@ -29,13 +29,14 @@ class SotaRagDatabase:
 
         # Detect and rebuild collections persisted under an incompatible
         # embedding algorithm so stale vectors are never queried.
+        self._chroma_client = chromadb.PersistentClient(path=self.persist_dir)
         self._migrate_legacy_collection()
 
         self.vector_db = Chroma(
+            client=self._chroma_client,
             collection_name=self.collection_name,
             embedding_function=self.embeddings,
-            persist_directory=self.persist_dir,
-            collection_metadata={"embedding_version": self.embedding_version}
+            collection_metadata={"hnsw:space": "cosine", "embedding_version": self.embedding_version}
         )
 
     def _migrate_legacy_collection(self) -> None:
@@ -46,9 +47,8 @@ class SotaRagDatabase:
         checks the persisted collection's version marker and destroys it for a clean
         rebuild if the version does not match.
         """
-        client = chromadb.PersistentClient(path=self.persist_dir)
         try:
-            coll = client.get_collection(self.collection_name)
+            coll = self._chroma_client.get_collection(self.collection_name)
             meta = coll.metadata or {}
             if meta.get("embedding_version") != self.embedding_version:
                 logger.warning(
@@ -58,7 +58,7 @@ class SotaRagDatabase:
                     meta.get("embedding_version"),
                     self.embedding_version,
                 )
-                client.delete_collection(self.collection_name)
+                self._chroma_client.delete_collection(self.collection_name)
         except Exception:
             # Collection does not exist yet — created automatically by Chroma
             pass
@@ -66,12 +66,12 @@ class SotaRagDatabase:
     def ingest_hierarchical_document(
         self,
         parent_text: str,
-        child_chunks: List[str],
+        child_chunks: list[str],
         context_prefix: str,
-        image_url: Optional[str],
+        image_url: str | None,
         has_visuals: bool,
-        metadata_origin: Dict[str, Any]
-    ) -> List[str]:
+        metadata_origin: dict[str, Any]
+    ) -> list[str]:
         """
         Ingests child chunks with contextual prefixes. Stores the full parent
         Markdown and image URI directly in each child's metadata payload.
@@ -96,12 +96,12 @@ class SotaRagDatabase:
     async def ingest_hierarchical_document_async(
         self,
         parent_text: str,
-        child_chunks: List[str],
+        child_chunks: list[str],
         context_prefix: str,
-        image_url: Optional[str],
+        image_url: str | None,
         has_visuals: bool,
-        metadata_origin: Dict[str, Any]
-    ) -> List[str]:
+        metadata_origin: dict[str, Any]
+    ) -> list[str]:
         """Async wrapper for non-blocking ingestion."""
         return await asyncio.to_thread(
             self.ingest_hierarchical_document,
@@ -117,10 +117,10 @@ class SotaRagDatabase:
         self,
         query: str,
         k: int = 3,
-        metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> List[Tuple[Document, float]]:
+        metadata_filter: dict[str, Any] | None = None
+    ) -> list[tuple[Document, float]]:
         """Synchronous similarity search with relevance scores and optional metadata filter."""
-        kwargs: Dict[str, Any] = {"query": query, "k": k}
+        kwargs: dict[str, Any] = {"query": query, "k": k}
         if metadata_filter:
             kwargs["filter"] = metadata_filter
         return self.vector_db.similarity_search_with_score(**kwargs)
@@ -129,8 +129,8 @@ class SotaRagDatabase:
         self,
         query: str,
         k: int = 3,
-        metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> List[Tuple[Document, float]]:
+        metadata_filter: dict[str, Any] | None = None
+    ) -> list[tuple[Document, float]]:
         """Asynchronous similarity search preventing event-loop stalls."""
         return await asyncio.to_thread(
             self.similarity_search_with_score,
@@ -143,10 +143,10 @@ class SotaRagDatabase:
         self,
         query: str,
         k: int = 3,
-        metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> List[Document]:
+        metadata_filter: dict[str, Any] | None = None
+    ) -> list[Document]:
         """Synchronous similarity search returning documents."""
-        kwargs: Dict[str, Any] = {"query": query, "k": k}
+        kwargs: dict[str, Any] = {"query": query, "k": k}
         if metadata_filter:
             kwargs["filter"] = metadata_filter
         return self.vector_db.similarity_search(**kwargs)
@@ -155,8 +155,8 @@ class SotaRagDatabase:
         self,
         query: str,
         k: int = 3,
-        metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> List[Document]:
+        metadata_filter: dict[str, Any] | None = None
+    ) -> list[Document]:
         """Asynchronous similarity search."""
         return await asyncio.to_thread(
             self.similarity_search,
@@ -168,7 +168,7 @@ class SotaRagDatabase:
     def get_collection_count(self) -> int:
         """Returns the total number of indexed chunk records."""
         try:
-            return len(self.vector_db.get(include=[])["ids"])
+            return self.vector_db._collection.count()
         except Exception:
             return 0
 

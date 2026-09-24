@@ -9,9 +9,11 @@ import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
 from httpx import ASGITransport
 
-from app import ChatMessage, app, condense_query
+from app import app, condense_query
 from ingest_cli import ingest_file
 from my_agent.agent import graph
+from my_agent.utils.state import make_initial_state
+from schemas import ChatMessage
 
 load_dotenv()
 
@@ -139,23 +141,7 @@ async def run_end_to_end_demo():
     print(f"{BOLD}{CYAN}3. LangGraph Workflow: CRAG with LLM-as-a-Judge & Provenance{RESET}")
     print(f"{BOLD}{CYAN}------------------------------------------------------------{RESET}")
 
-    initial_state = {
-        "raw_query": raw_followup,
-        "query": condensed,
-        "condensed_query": condensed,
-        "retrieved_chunks": [],
-        "route_decision": "retrieve",
-        "retry_count": 0,
-        "critique": None,
-        "expanded_query": None,
-        "is_relevant": None,
-        "llm_inputs": [],
-        "answer": None,
-        "citations": [],
-        "is_grounded": None,
-        "groundedness_score": None,
-        "metadata_filter": {"doc_id": "manual_turbine_a9"}
-    }
+    initial_state = make_initial_state(raw_followup, condensed, {"doc_id": "manual_turbine_a9"})
 
     final_state = await graph.ainvoke(initial_state)
     print(f"{GREEN}[✓] State Graph Execution Complete!{RESET}")

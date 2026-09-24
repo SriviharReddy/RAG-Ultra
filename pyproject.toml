@@ -39,4 +39,13 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["F", "I", "W"]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = [
+    "B008",  # Function call in default arg — FastAPI File()/Form() idiom
+    "B905",  # zip() without strict= — intentional
+    "E501",  # Line length handled by formatter
+    "E741",  # Ambiguous variable names (common in math contexts)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "my_agent", "schemas"]

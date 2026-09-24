@@ -2,10 +2,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -13,12 +15,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel, Field
 
 from core.config import get_fast_llm, get_settings
 from core.database import get_database
 from ingest_cli import ingest_file
 from my_agent.agent import graph
+from my_agent.utils.state import make_initial_state
+from schemas import (
+    ChatMessage,
+    CitationResponse,
+    ExecutionMetadata,
+    HealthResponse,
+    IngestResponse,
+    QueryRequest,
+    QueryResponse,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -48,60 +59,9 @@ app.add_middleware(
 settings.ensure_directories()
 app.mount("/static/images", StaticFiles(directory=settings.image_storage_dir), name="static_images")
 
-# --- Schema Definitions ---
-
-class ChatMessage(BaseModel):
-    role: str = Field(description="'user' or 'assistant'")
-    content: str = Field(description="Message text")
-
-class QueryRequest(BaseModel):
-    query: str = Field(description="User query or follow-up question")
-    chat_history: Optional[List[ChatMessage]] = Field(default=[], description="Preceding conversation context")
-    metadata_filter: Optional[Dict[str, Any]] = Field(default=None, description="Optional Chroma metadata filter (e.g. {'doc_id': 'xyz'})")
-
-class CitationResponse(BaseModel):
-    id: int
-    source: str
-    page: Optional[int] = None
-    doc_id: Optional[str] = None
-    snippet: str
-    image_url: Optional[str] = None
-
-class ExecutionMetadata(BaseModel):
-    retry_count: int
-    latency_ms: float
-    is_relevant: Optional[bool] = None
-    is_grounded: Optional[bool] = None
-    groundedness_score: Optional[float] = None
-    critique: Optional[str] = None
-
-class QueryResponse(BaseModel):
-    success: bool
-    raw_query: str
-    condensed_query: str
-    answer: str
-    citations: List[CitationResponse]
-    retrieved_chunks: List[Dict[str, Any]]
-    metadata: ExecutionMetadata
-
-class IngestResponse(BaseModel):
-    success: bool
-    doc_id: str
-    source: str
-    pages_processed: int
-    total_chunks_indexed: int
-    message: str
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    collection_name: str
-    collection_count: int
-    models: Dict[str, str]
-
 # --- Query Condensation Helper (Pattern A) ---
 
-async def condense_query(query: str, chat_history: List[ChatMessage]) -> str:
+async def condense_query(query: str, chat_history: list[ChatMessage]) -> str:
     """
     Evaluates raw query and preceding chat history. If history is present,
     invokes the fast model to rewrite the pronoun-dependent follow-up query
@@ -154,9 +114,9 @@ async def health_check():
 @app.post("/api/v1/ingest", response_model=IngestResponse)
 async def ingest_document_file(
     file: UploadFile = File(...),
-    document_id: Optional[str] = Form(None),
-    chunk_size: Optional[int] = Form(None),
-    chunk_overlap: Optional[int] = Form(None)
+    document_id: str | None = Form(None),
+    chunk_size: int | None = Form(None),
+    chunk_overlap: int | None = Form(None)
 ):
     """
     Upload and index a PDF or Markdown document into the SOTA RAG database.
@@ -178,6 +138,9 @@ async def ingest_document_file(
 
     try:
         content = await file.read()
+        if len(content) > 100 * 1024 * 1024:
+            raise HTTPException(413, "File too large. Maximum 100 MB.")
+
         with open(temp_path, "wb") as f:
             f.write(content)
 
@@ -196,16 +159,13 @@ async def ingest_document_file(
             total_chunks_indexed=stats.get("total_chunks_indexed", 0),
             message=f"Successfully indexed document '{filename}' with {stats.get('total_chunks_indexed', 0)} chunks."
         )
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Ingestion failed for '%s'", filename)
-        raise HTTPException(status_code=500, detail="Internal ingestion failure. Check server logs for details.")
+        raise HTTPException(status_code=500, detail="Internal ingestion failure. Check server logs for details.") from None
     finally:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                os.rmdir(temp_dir)
-            except Exception:
-                pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query_rag_agent(request: QueryRequest):
@@ -220,27 +180,11 @@ async def query_rag_agent(request: QueryRequest):
     condensed_query = await condense_query(request.query, request.chat_history or [])
 
     # 2. Initialize graph state
-    initial_state = {
-        "raw_query": request.query,
-        "query": condensed_query,
-        "condensed_query": condensed_query,
-        "retrieved_chunks": [],
-        "route_decision": "retrieve",
-        "retry_count": 0,
-        "critique": None,
-        "expanded_query": None,
-        "is_relevant": None,
-        "llm_inputs": [],
-        "answer": None,
-        "citations": [],
-        "is_grounded": None,
-        "groundedness_score": None,
-        "metadata_filter": request.metadata_filter
-    }
+    initial_state = make_initial_state(request.query, condensed_query, request.metadata_filter)
 
     try:
         # 3. Execute LangGraph workflow
-        final_state = await graph.ainvoke(initial_state)
+        final_state = await asyncio.wait_for(graph.ainvoke(initial_state), timeout=120.0)
 
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         answer = final_state.get("answer") or "Could not generate an answer."
@@ -285,12 +229,20 @@ async def query_rag_agent(request: QueryRequest):
             retrieved_chunks=retrieved_chunks_out,
             metadata=metadata
         )
+    except TimeoutError:
+        logger.error("RAG workflow timed out for query: '%s'", request.query)
+        raise HTTPException(
+            status_code=504,
+            detail="Query processing timed out after 120 seconds."
+        ) from None
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("RAG workflow failed for query: '%s'", request.query)
         raise HTTPException(
             status_code=500,
             detail="Internal error processing query. Check server logs for details."
-        )
+        ) from None
 
 @app.post("/api/v1/query/stream")
 async def query_rag_agent_stream(request: QueryRequest):
@@ -298,10 +250,10 @@ async def query_rag_agent_stream(request: QueryRequest):
     Server-Sent Events (SSE) Streaming Endpoint.
     Streams real-time LangGraph step transitions, judge critiques, and token chunks.
     """
-    async def sse_event_generator() -> AsyncGenerator[str, None]:
+    async def sse_event_generator() -> AsyncGenerator[str]:
         start_time = time.perf_counter()
 
-        def format_sse(event_type: str, data: Dict[str, Any]) -> str:
+        def format_sse(event_type: str, data: dict[str, Any]) -> str:
             return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
         yield format_sse("start", {"raw_query": request.query, "timestamp": time.time()})
@@ -310,23 +262,7 @@ async def query_rag_agent_stream(request: QueryRequest):
         condensed = await condense_query(request.query, request.chat_history or [])
         yield format_sse("query_condensed", {"condensed_query": condensed})
 
-        initial_state = {
-            "raw_query": request.query,
-            "query": condensed,
-            "condensed_query": condensed,
-            "retrieved_chunks": [],
-            "route_decision": "retrieve",
-            "retry_count": 0,
-            "critique": None,
-            "expanded_query": None,
-            "is_relevant": None,
-            "llm_inputs": [],
-            "answer": None,
-            "citations": [],
-            "is_grounded": None,
-            "groundedness_score": None,
-            "metadata_filter": request.metadata_filter
-        }
+        initial_state = make_initial_state(request.query, condensed, request.metadata_filter)
 
         latest_state = initial_state
 
@@ -369,12 +305,11 @@ async def query_rag_agent_stream(request: QueryRequest):
 
                     elif node_name == "generate":
                         answer_text = node_state.get("answer", "")
-                        # Stream the answer in simulated token chunks if generated in bulk
+                        # Note: Answer is generated in bulk, then chunked for progressive client rendering.
                         words = answer_text.split(" ")
                         for i in range(0, len(words), 4):
                             token_batch = " ".join(words[i:i+4]) + " "
                             yield format_sse("token", {"chunk": token_batch})
-                            await asyncio.sleep(0.01)
 
                     elif node_name == "verify":
                         yield format_sse("verifying", {
