@@ -1,22 +1,41 @@
-import os
-import time
-import json
-import uuid
-import tempfile
 import asyncio
-from typing import Optional, List, Dict, Any, AsyncGenerator
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+import json
+import logging
+import os
+import shutil
+import tempfile
+import time
+import uuid
+from collections.abc import AsyncGenerator
+from typing import Any
+
 from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
 
-from core.config import get_settings, get_fast_llm
+from core.config import get_fast_llm, get_settings
 from core.database import get_database
 from ingest_cli import ingest_file
-from my_agent.agent import graph
+from rag_pipeline.agent import graph
+from rag_pipeline.utils.state import make_initial_state
+from schemas import (
+    ChatMessage,
+    CitationResponse,
+    ExecutionMetadata,
+    HealthResponse,
+    IngestResponse,
+    QueryRequest,
+    QueryResponse,
+)
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
 
 load_dotenv()
 settings = get_settings()
@@ -31,7 +50,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -40,60 +59,9 @@ app.add_middleware(
 settings.ensure_directories()
 app.mount("/static/images", StaticFiles(directory=settings.image_storage_dir), name="static_images")
 
-# --- Schema Definitions ---
-
-class ChatMessage(BaseModel):
-    role: str = Field(description="'user' or 'assistant'")
-    content: str = Field(description="Message text")
-
-class QueryRequest(BaseModel):
-    query: str = Field(description="User query or follow-up question")
-    chat_history: Optional[List[ChatMessage]] = Field(default=[], description="Preceding conversation context")
-    metadata_filter: Optional[Dict[str, Any]] = Field(default=None, description="Optional Chroma metadata filter (e.g. {'doc_id': 'xyz'})")
-
-class CitationResponse(BaseModel):
-    id: int
-    source: str
-    page: Optional[int] = None
-    doc_id: Optional[str] = None
-    snippet: str
-    image_url: Optional[str] = None
-
-class ExecutionMetadata(BaseModel):
-    retry_count: int
-    latency_ms: float
-    is_relevant: Optional[bool] = None
-    is_grounded: Optional[bool] = None
-    groundedness_score: Optional[float] = None
-    critique: Optional[str] = None
-
-class QueryResponse(BaseModel):
-    success: bool
-    raw_query: str
-    condensed_query: str
-    answer: str
-    citations: List[CitationResponse]
-    retrieved_chunks: List[Dict[str, Any]]
-    metadata: ExecutionMetadata
-
-class IngestResponse(BaseModel):
-    success: bool
-    doc_id: str
-    source: str
-    pages_processed: int
-    total_chunks_indexed: int
-    message: str
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    collection_name: str
-    collection_count: int
-    models: Dict[str, str]
-
 # --- Query Condensation Helper (Pattern A) ---
 
-async def condense_query(query: str, chat_history: List[ChatMessage]) -> str:
+async def condense_query(query: str, chat_history: list[ChatMessage]) -> str:
     """
     Evaluates raw query and preceding chat history. If history is present,
     invokes the fast model to rewrite the pronoun-dependent follow-up query
@@ -118,10 +86,10 @@ Standalone Question:"""
         fast_llm = get_fast_llm(temperature=0.0)
         response = await fast_llm.ainvoke([HumanMessage(content=prompt)])
         condensed = str(response.content).strip()
-        print(f"[Query Condenser] Raw: '{query}' -> Condensed: '{condensed}'")
+        logger.info(f"[Query Condenser] Raw: '{query}' -> Condensed: '{condensed}'")
         return condensed
     except Exception as e:
-        print(f"[Query Condenser Fallback] Using raw query due to: {e}")
+        logger.warning(f"[Query Condenser Fallback] Using raw query due to: {e}")
         return query
 
 # --- REST Endpoints ---
@@ -146,9 +114,9 @@ async def health_check():
 @app.post("/api/v1/ingest", response_model=IngestResponse)
 async def ingest_document_file(
     file: UploadFile = File(...),
-    document_id: Optional[str] = Form(None),
-    chunk_size: Optional[int] = Form(None),
-    chunk_overlap: Optional[int] = Form(None)
+    document_id: str | None = Form(None),
+    chunk_size: int | None = Form(None),
+    chunk_overlap: int | None = Form(None)
 ):
     """
     Upload and index a PDF or Markdown document into the SOTA RAG database.
@@ -170,6 +138,9 @@ async def ingest_document_file(
 
     try:
         content = await file.read()
+        if len(content) > 100 * 1024 * 1024:
+            raise HTTPException(413, "File too large. Maximum 100 MB.")
+
         with open(temp_path, "wb") as f:
             f.write(content)
 
@@ -188,15 +159,13 @@ async def ingest_document_file(
             total_chunks_indexed=stats.get("total_chunks_indexed", 0),
             message=f"Successfully indexed document '{filename}' with {stats.get('total_chunks_indexed', 0)} chunks."
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Ingestion failed for '%s'", filename)
+        raise HTTPException(status_code=500, detail="Internal ingestion failure. Check server logs for details.") from None
     finally:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                os.rmdir(temp_dir)
-            except Exception:
-                pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query_rag_agent(request: QueryRequest):
@@ -211,32 +180,16 @@ async def query_rag_agent(request: QueryRequest):
     condensed_query = await condense_query(request.query, request.chat_history or [])
 
     # 2. Initialize graph state
-    initial_state = {
-        "raw_query": request.query,
-        "query": condensed_query,
-        "condensed_query": condensed_query,
-        "retrieved_chunks": [],
-        "route_decision": "retrieve",
-        "retry_count": 0,
-        "critique": None,
-        "expanded_query": None,
-        "is_relevant": None,
-        "llm_inputs": [],
-        "answer": None,
-        "citations": [],
-        "is_grounded": None,
-        "groundedness_score": None,
-        "metadata_filter": request.metadata_filter
-    }
+    initial_state = make_initial_state(request.query, condensed_query, request.metadata_filter)
 
     try:
         # 3. Execute LangGraph workflow
-        final_state = await graph.ainvoke(initial_state)
+        final_state = await asyncio.wait_for(graph.ainvoke(initial_state), timeout=120.0)
 
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         answer = final_state.get("answer") or "Could not generate an answer."
         citations_data = final_state.get("citations", [])
-        
+
         citations_response = [
             CitationResponse(
                 id=c.get("id", idx + 1),
@@ -276,11 +229,20 @@ async def query_rag_agent(request: QueryRequest):
             retrieved_chunks=retrieved_chunks_out,
             metadata=metadata
         )
-    except Exception as e:
+    except TimeoutError:
+        logger.error("RAG workflow timed out for query: '%s'", request.query)
+        raise HTTPException(
+            status_code=504,
+            detail="Query processing timed out after 120 seconds."
+        ) from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("RAG workflow failed for query: '%s'", request.query)
         raise HTTPException(
             status_code=500,
-            detail=f"Error executing agent RAG workflow: {str(e)}"
-        )
+            detail="Internal error processing query. Check server logs for details."
+        ) from None
 
 @app.post("/api/v1/query/stream")
 async def query_rag_agent_stream(request: QueryRequest):
@@ -288,10 +250,10 @@ async def query_rag_agent_stream(request: QueryRequest):
     Server-Sent Events (SSE) Streaming Endpoint.
     Streams real-time LangGraph step transitions, judge critiques, and token chunks.
     """
-    async def sse_event_generator() -> AsyncGenerator[str, None]:
+    async def sse_event_generator() -> AsyncGenerator[str]:
         start_time = time.perf_counter()
 
-        def format_sse(event_type: str, data: Dict[str, Any]) -> str:
+        def format_sse(event_type: str, data: dict[str, Any]) -> str:
             return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
         yield format_sse("start", {"raw_query": request.query, "timestamp": time.time()})
@@ -300,79 +262,82 @@ async def query_rag_agent_stream(request: QueryRequest):
         condensed = await condense_query(request.query, request.chat_history or [])
         yield format_sse("query_condensed", {"condensed_query": condensed})
 
-        initial_state = {
-            "raw_query": request.query,
-            "query": condensed,
-            "condensed_query": condensed,
-            "retrieved_chunks": [],
-            "route_decision": "retrieve",
-            "retry_count": 0,
-            "critique": None,
-            "expanded_query": None,
-            "is_relevant": None,
-            "llm_inputs": [],
-            "answer": None,
-            "citations": [],
-            "is_grounded": None,
-            "groundedness_score": None,
-            "metadata_filter": request.metadata_filter
-        }
+        initial_state = make_initial_state(request.query, condensed, request.metadata_filter)
 
         latest_state = initial_state
 
         try:
-            # Stream node transitions
-            async for output in graph.astream(initial_state):
-                for node_name, node_state in output.items():
-                    latest_state.update(node_state)
-                    
-                    if node_name == "retrieve":
+            current_node = ""
+            tokens_streamed = False
+
+            async for event in graph.astream_events(initial_state, version="v2"):
+                kind = event["event"]
+                name = event.get("name", "")
+
+                # Track which graph node is executing
+                if kind == "on_chain_start" and name in {"retrieve", "evaluate", "assemble", "generate", "verify"}:
+                    current_node = name
+                    if name == "generate":
+                        tokens_streamed = False
+
+                # Node completed — emit structured SSE event
+                elif kind == "on_chain_end" and name in {"retrieve", "evaluate", "assemble", "generate", "verify"}:
+                    node_output = event.get("data", {}).get("output") or {}
+                    if isinstance(node_output, dict):
+                        latest_state.update(node_output)
+
+                    if name == "retrieve":
                         chunks_summary = [
                             {"source": c.get("metadata", {}).get("source"), "page": c.get("metadata", {}).get("page")}
-                            for c in node_state.get("retrieved_chunks", [])
+                            for c in node_output.get("retrieved_chunks", [])
                         ]
                         yield format_sse("retrieving", {
                             "node": "retrieve",
                             "chunks_found": len(chunks_summary),
                             "chunks": chunks_summary
                         })
-
-                    elif node_name == "evaluate":
+                    elif name == "evaluate":
                         yield format_sse("evaluating", {
                             "node": "evaluate",
-                            "is_relevant": node_state.get("is_relevant"),
-                            "critique": node_state.get("critique"),
-                            "expanded_query": node_state.get("expanded_query"),
-                            "route_decision": node_state.get("route_decision"),
-                            "retry_count": node_state.get("retry_count")
+                            "is_relevant": node_output.get("is_relevant"),
+                            "critique": node_output.get("critique"),
+                            "expanded_query": node_output.get("expanded_query"),
+                            "route_decision": node_output.get("route_decision"),
+                            "retry_count": node_output.get("retry_count")
                         })
-
-                    elif node_name == "assemble":
+                    elif name == "assemble":
                         citations = [
                             {"id": c.get("id"), "source": c.get("source"), "page": c.get("page")}
-                            for c in node_state.get("citations", [])
+                            for c in node_output.get("citations", [])
                         ]
                         yield format_sse("multimodal_assembly", {
                             "node": "assemble",
                             "citations": citations
                         })
-
-                    elif node_name == "generate":
-                        answer_text = node_state.get("answer", "")
-                        # Stream the answer in simulated token chunks if generated in bulk
-                        words = answer_text.split(" ")
-                        for i in range(0, len(words), 4):
-                            token_batch = " ".join(words[i:i+4]) + " "
-                            yield format_sse("token", {"chunk": token_batch})
-                            await asyncio.sleep(0.01)
-
-                    elif node_name == "verify":
+                    elif name == "generate":
+                        if not tokens_streamed:
+                            fallback_text = node_output.get("answer", "")
+                            if fallback_text:
+                                yield format_sse("token", {"chunk": fallback_text})
+                    elif name == "verify":
                         yield format_sse("verifying", {
                             "node": "verify",
-                            "is_grounded": node_state.get("is_grounded"),
-                            "groundedness_score": node_state.get("groundedness_score"),
-                            "critique": node_state.get("critique")
+                            "is_grounded": node_output.get("is_grounded"),
+                            "groundedness_score": node_output.get("groundedness_score"),
+                            "critique": node_output.get("critique")
                         })
+
+                    if current_node == name:
+                        current_node = ""
+
+                # Real token streaming from the generation LLM
+                elif kind == "on_chat_model_stream" and current_node == "generate":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        token = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                        if token:
+                            tokens_streamed = True
+                            yield format_sse("token", {"chunk": token})
 
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             yield format_sse("final_result", {
@@ -386,9 +351,9 @@ async def query_rag_agent_stream(request: QueryRequest):
                 }
             })
             yield format_sse("done", {"status": "completed"})
-
-        except Exception as err:
-            yield format_sse("error", {"message": str(err)})
+        except Exception:
+            logger.exception("Streaming RAG workflow failed for query: '%s'", request.query)
+            yield format_sse("error", {"message": "Internal error processing query. Check server logs for details."})
 
     return StreamingResponse(
         sse_event_generator(),
@@ -402,4 +367,4 @@ async def query_rag_agent_stream(request: QueryRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host=settings.host, port=settings.port, reload=True)
+    uvicorn.run("app:app", host=settings.host, port=settings.port, reload=settings.uvicorn_reload)

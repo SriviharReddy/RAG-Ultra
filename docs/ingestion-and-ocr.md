@@ -31,7 +31,7 @@ RAG-Ultra includes a dedicated ingestion engine capable of parsing complex techn
              |
              v
 +----------------------------+
-| 5. Chroma Vector Indexer   | --> Stores child chunks with embedded parent text & image URIs
+| 5. Chroma & ParentStore    | --> Embeds child chunks (with parent_key); stores parent text in ParentStore
 +----------------------------+
 ```
 
@@ -79,6 +79,9 @@ uv run python ingest_cli.py --file README.md --id readme_doc
 - `--id`: Document unique identifier string (default: `doc_001`).
 - `--chunk-size`: Character limit per child chunk (default: `800`).
 - `--chunk-overlap`: Overlap between consecutive chunks (default: `100`).
+
+### Logging:
+The CLI configures the root logger at `INFO` level and emits human-readable progress messages (page renders, chunk counts, OCR fallback notices) to stderr. Server-side error handlers log full exception traces via `logger.exception()`.
 
 ---
 

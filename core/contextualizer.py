@@ -1,5 +1,11 @@
+import logging
+
 from langchain_core.messages import HumanMessage
+
 from core.config import get_fast_llm
+
+logger = logging.getLogger(__name__)
+
 
 class ContextualRetrievalEnricher:
     """
@@ -32,7 +38,7 @@ Mention the primary topic, section purpose, and key entities. Output ONLY the ra
                     return prefix
             except Exception as e:
                 # Gracefully fallback if LLM endpoint is unreachable
-                print(f"[Contextualizer] LLM invocation skipped/failed ({e}), applying heuristic prefix.")
+                logger.warning(f"[Contextualizer] LLM invocation skipped/failed ({e}), applying heuristic prefix.")
 
         # Fallback deterministic prefix
         clean_summary = document_summary.replace("\n", " ").strip()

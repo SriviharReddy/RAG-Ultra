@@ -1,24 +1,38 @@
-import os
-import io
 import argparse
 import asyncio
-from typing import List, Tuple, Dict, Any, Optional
-from PIL import Image
+import io
+import logging
+import os
+import re
+from dataclasses import dataclass
+from typing import Any
+
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from my_agent.utils.tools import vision_ocr_parse
-from core.database import get_database
-from core.contextualizer import ContextualRetrievalEnricher
+from PIL import Image
+
 from core.config import get_settings
+from core.contextualizer import ContextualRetrievalEnricher
+from core.database import get_database
+from rag_pipeline.utils.tools import vision_ocr_parse
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> List[Tuple[int, str, str, bool]]:
+
+@dataclass(frozen=True, slots=True)
+class PageRecord:
+    page_num: int
+    image_rel_url: str
+    image_disk_path: str
+    native_text: str
+    has_visuals: bool
+
+
+def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> list[PageRecord]:
     """
     Renders each page of a PDF as a normalized JPEG image cached locally.
-    Extracts native text, checks for visual graphics/tables, and returns:
-    List of (page_num, image_rel_path, native_text, has_visuals).
+    Extracts native text and detects visual graphics/tables for each page.
     """
     settings = get_settings()
     doc_image_dir = os.path.join(settings.image_storage_dir, doc_id)
@@ -27,7 +41,7 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
     page_records = []
     pdf_document = pymupdf.open(pdf_path)
     total_pages = len(pdf_document)
-    print(f"[Ingestion] Rendering '{pdf_path}' ({total_pages} pages) to local image storage...")
+    logger.info(f"[Ingestion] Rendering '{pdf_path}' ({total_pages} pages) to local image storage...")
 
     for page_idx in range(total_pages):
         page_num = page_idx + 1
@@ -37,12 +51,12 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
         zoom = dpi / 72.0
         matrix = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=matrix)
-        
+
         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
         image_filename = f"page_{page_num}.jpg"
         image_disk_path = os.path.join(doc_image_dir, image_filename)
         img.save(image_disk_path, format="JPEG", quality=85)
-        
+
         # Static URL path for API clients/browser
         image_rel_url = f"/static/images/{doc_id}/{image_filename}"
 
@@ -52,23 +66,25 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
         # 3. Detect visual components (embedded raster images, vector drawings, tables)
         embedded_images = page.get_images()
         drawings = page.get_drawings()
+        # Detect visual components: embedded raster images, significant vector drawings,
+        # or structured data patterns (not just keyword mentions)
+        text_lower = native_text.lower()
         has_visuals = (
             len(embedded_images) > 0
-            or len(drawings) > 2
-            or "table" in native_text.lower()
-            or "|" in native_text
-            or "figure" in native_text.lower()
-            or "chart" in native_text.lower()
+            or len(drawings) > 5  # Raise threshold: >2 catches simple underlines
+            or bool(re.search(r'\|\s*\w+.*\|\s*\w+.*\|', native_text))  # Actual table rows
+            or bool(re.search(r'\bfigure\s+\d', text_lower))  # "Figure 1", not "figure out"
+            or bool(re.search(r'\bchart\s+\d', text_lower))   # "Chart 2", not "chart a course"
         )
 
-        page_records.append((page_num, image_rel_url, image_disk_path, native_text, has_visuals))
+        page_records.append(PageRecord(page_num, image_rel_url, image_disk_path, native_text, has_visuals))
 
     pdf_document.close()
     return page_records
 
-def process_markdown_or_text_file(file_path: str, doc_id: str) -> List[Tuple[int, str, str, str, bool]]:
+def process_markdown_or_text_file(file_path: str, doc_id: str) -> list[PageRecord]:
     """Splits plain Markdown/Text file into logical page/section blocks."""
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open(file_path, encoding="utf-8") as f:
         full_text = f.read()
 
     # Split on explicit markdown page breaks or headers if available
@@ -84,16 +100,16 @@ def process_markdown_or_text_file(file_path: str, doc_id: str) -> List[Tuple[int
     for idx, page_text in enumerate(pages):
         page_num = idx + 1
         has_visuals = "|" in page_text or "![" in page_text or "Table" in page_text or "Chart" in page_text
-        page_records.append((page_num, "", "", page_text.strip(), has_visuals))
+        page_records.append(PageRecord(page_num, "", "", page_text.strip(), has_visuals))
 
     return page_records
 
 async def ingest_file(
     file_path: str,
     document_id: str = "doc_001",
-    chunk_size: Optional[int] = None,
-    chunk_overlap: Optional[int] = None
-) -> Dict[str, Any]:
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None
+) -> dict[str, Any]:
     """
     Layout-aware ingestion pipeline:
     1. Page normalization & local image caching
@@ -120,9 +136,9 @@ async def ingest_file(
     file_ext = os.path.splitext(file_path)[1].lower()
     doc_summary = f"Parsed technical document: '{filename}' (ID: {document_id})."
 
-    print("\n========================================================")
-    print(f"[Ingest Engine] Starting ingestion for '{filename}'...")
-    print("========================================================")
+    logger.info("========================================================")
+    logger.info(f"[Ingest Engine] Starting ingestion for '{filename}'...")
+    logger.info("========================================================")
 
     if file_ext == ".pdf":
         page_data = render_and_cache_pdf_pages(file_path, document_id)
@@ -132,41 +148,41 @@ async def ingest_file(
     total_chunks_indexed = 0
 
     for record in page_data:
-        page_num = record[0]
-        image_rel_url = record[1]
-        image_disk_path = record[2]
-        native_text = record[3]
-        has_visuals = record[4]
+        page_num = record.page_num
+        image_rel_url = record.image_rel_url
+        image_disk_path = record.image_disk_path
+        native_text = record.native_text
+        has_visuals = record.has_visuals
 
-        print(f"\n--- Ingesting Page {page_num}/{len(page_data)} ---")
+        logger.info(f"--- Ingesting Page {page_num}/{len(page_data)} ---")
 
         # Step 2: Attempt OCR if local disk image is available, else native text fallback
         page_markdown = ""
         if image_disk_path and os.path.exists(image_disk_path):
-            print(f"[Ingest Engine] Trying Vision OCR for page {page_num}...")
+            logger.info(f"[Ingest Engine] Trying Vision OCR for page {page_num}...")
             ocr_result = await vision_ocr_parse.ainvoke({"image_source": image_disk_path})
             if ocr_result and len(ocr_result.strip()) > 20:
                 page_markdown = ocr_result.strip()
-                print(f"[Ingest Engine] Vision OCR succeeded ({len(page_markdown)} chars).")
+                logger.info(f"[Ingest Engine] Vision OCR succeeded ({len(page_markdown)} chars).")
 
         if not page_markdown:
-            print(f"[Ingest Engine] Using native layout text ({len(native_text)} chars).")
+            logger.info(f"[Ingest Engine] Using native layout text ({len(native_text)} chars).")
             page_markdown = native_text or f"Page {page_num} content from {filename}."
 
         # Step 3: Contextual Retrieval prefix
-        print("[Ingest Engine] Generating Contextual prefix...")
+        logger.info("[Ingest Engine] Generating Contextual prefix...")
         context_prefix = await enricher.generate_page_prefix(doc_summary, page_markdown[:1500], page_num=page_num)
-        print(f"[Ingest Engine] Prefix: \"{context_prefix}\"")
+        logger.info(f"[Ingest Engine] Prefix: \"{context_prefix}\"")
 
         # Step 4: Recursive Markdown chunking
         child_chunks = splitter.split_text(page_markdown)
         if not child_chunks:
             child_chunks = [page_markdown]
 
-        print(f"[Ingest Engine] Split into {len(child_chunks)} layout-aware chunks.")
+        logger.info(f"[Ingest Engine] Split into {len(child_chunks)} layout-aware chunks.")
 
         # Step 5: Hierarchical indexing with parent payload
-        db.ingest_hierarchical_document(
+        await db.ingest_hierarchical_document_async(
             parent_text=page_markdown,
             child_chunks=child_chunks,
             context_prefix=context_prefix,
@@ -181,7 +197,7 @@ async def ingest_file(
         )
         total_chunks_indexed += len(child_chunks)
 
-    print(f"\n[Ingest Engine] Ingestion complete: {len(page_data)} pages, {total_chunks_indexed} chunks indexed.")
+    logger.info(f"[Ingest Engine] Ingestion complete: {len(page_data)} pages, {total_chunks_indexed} chunks indexed.")
     return {
         "status": "success",
         "doc_id": document_id,
@@ -191,6 +207,11 @@ async def ingest_file(
     }
 
 def main():
+    load_dotenv()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Ingest PDF or Markdown documents into the SOTA RAG database.")
     parser.add_argument("--pdf", "--file", dest="file_path", type=str, required=True, help="Path to local PDF/MD file")
     parser.add_argument("--id", dest="doc_id", type=str, default="doc_001", help="Document Identifier")
@@ -199,7 +220,7 @@ def main():
     args = parser.parse_args()
 
     if not os.path.exists(args.file_path):
-        print(f"Error: File '{args.file_path}' does not exist.")
+        logger.error(f"Error: File '{args.file_path}' does not exist.")
         exit(1)
 
     asyncio.run(ingest_file(

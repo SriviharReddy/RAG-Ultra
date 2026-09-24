@@ -1,12 +1,13 @@
-from langgraph.graph import StateGraph, END
-from my_agent.utils.state import AgentState
-from my_agent.utils.nodes import (
-    retrieve_node,
-    evaluate_relevance_node,
+from langgraph.graph import END, StateGraph
+
+from rag_pipeline.utils.nodes import (
     assemble_multimodal_context_node,
+    evaluate_relevance_node,
     generate_response_node,
-    verify_groundedness_node
+    retrieve_node,
+    verify_groundedness_node,
 )
+from rag_pipeline.utils.state import AgentState
 
 # Initialize LangGraph StateGraph with typed AgentState
 workflow = StateGraph(AgentState)

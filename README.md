@@ -13,8 +13,8 @@
 
 - **Layout-Aware Ingestion**: Parses PDFs and Markdown into clean, structured text preserving tables (`| col |`), LaTeX equations (`$...$`), and diagrams.
 - **Anthropic Contextual Retrieval**: Prepends 1-sentence page-level context overlays to child chunks to boost semantic recall.
-- **Single-Database Parent Payloads**: Stores complete parent page text and image URIs directly inside Chroma metadata, eliminating dual-store synchronization.
-- **Corrective RAG (CRAG) with Judge Fast-Path**: Structured Pydantic LLM-as-a-Judge grading with an automatic fast-path for high-confidence matches ($\ge 0.82$).
+- **Deduplicated Parent Store (`ParentStore`)**: Stores parent page text once in a persistent store with lightweight `parent_key` references in Chroma metadata, preventing storage explosion.
+- **Corrective RAG (CRAG) with Judge Fast-Path**: Structured Pydantic LLM-as-a-Judge grading with an automatic fast-path for high-confidence matches (cosine distance $\le 0.30$).
 - **Reciprocal Rank Fusion (RRF)**: Merges retried search iterations with prior hits to ensure no context is discarded.
 - **Conditional Multimodal Assembly**: Loads and base64-encodes page diagrams only when visual graphics are present.
 - **Groundedness Self-Correction**: Verifies generated answers against retrieved context to prevent hallucinations.
@@ -25,7 +25,7 @@
 ## 📊 System Flow
 
 ```text
-[ Document / PDF ] ──> [ Vision OCR & Splitter ] ──> [ Chroma (Parent Payloads) ]
+[ Document / PDF ] ──> [ Vision OCR & Splitter ] ──> [ Chroma + ParentStore ]
                                                               │
 [ Query + History ] ──> [ Query Condenser ] ──> [ Retrieve Node ] <───┐ (Retry Loop)
                                                       │               │
@@ -127,14 +127,15 @@ rag-ultra/
 │   └── configuration.md      # Settings & environment parameters
 │
 ├── core/                     # Core Backend Components
-│   ├── config.py             # Pydantic settings & LLM factories
-│   ├── database.py           # Thread-safe async Chroma parent-payload wrapper
+│   ├── config.py             # Pydantic settings & cached LLM factories
+│   ├── database.py           # Thread-safe Chroma & ParentStore wrapper
 │   └── contextualizer.py     # Contextual Retrieval summarizer
 │
-├── my_agent/                 # Compiled LangGraph Workflow
+├── rag_pipeline/             # Compiled LangGraph Workflow
 │   ├── agent.py              # StateGraph with CRAG & verification edges
 │   └── utils/                # Nodes, state schemas, and tools
 │
+├── schemas.py                # Decoupled Pydantic API request/response contracts
 ├── app.py                    # FastAPI Gateway (REST & SSE streaming)
 ├── ingest_cli.py             # CLI Ingestion tool (PDF & Markdown)
 ├── demo.py                   # Self-contained showcase demo & verification suite

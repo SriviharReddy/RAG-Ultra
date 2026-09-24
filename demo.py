@@ -1,17 +1,19 @@
+import asyncio
+import json
 import os
 import sys
-import json
-import asyncio
 import tempfile
-import pymupdf  # PyMuPDF
-import httpx
-from httpx import ASGITransport
-from dotenv import load_dotenv
 
-from core.config import get_settings
+import httpx
+import pymupdf  # PyMuPDF
+from dotenv import load_dotenv
+from httpx import ASGITransport
+
+from app import app, condense_query
 from ingest_cli import ingest_file
-from my_agent.agent import graph
-from app import app, condense_query, ChatMessage
+from rag_pipeline.agent import graph
+from rag_pipeline.utils.state import make_initial_state
+from schemas import ChatMessage
 
 load_dotenv()
 
@@ -139,23 +141,7 @@ async def run_end_to_end_demo():
     print(f"{BOLD}{CYAN}3. LangGraph Workflow: CRAG with LLM-as-a-Judge & Provenance{RESET}")
     print(f"{BOLD}{CYAN}------------------------------------------------------------{RESET}")
 
-    initial_state = {
-        "raw_query": raw_followup,
-        "query": condensed,
-        "condensed_query": condensed,
-        "retrieved_chunks": [],
-        "route_decision": "retrieve",
-        "retry_count": 0,
-        "critique": None,
-        "expanded_query": None,
-        "is_relevant": None,
-        "llm_inputs": [],
-        "answer": None,
-        "citations": [],
-        "is_grounded": None,
-        "groundedness_score": None,
-        "metadata_filter": {"doc_id": "manual_turbine_a9"}
-    }
+    initial_state = make_initial_state(raw_followup, condensed, {"doc_id": "manual_turbine_a9"})
 
     final_state = await graph.ainvoke(initial_state)
     print(f"{GREEN}[✓] State Graph Execution Complete!{RESET}")
@@ -211,10 +197,13 @@ async def run_end_to_end_demo():
             "chat_history": []
         }
         event_count = 0
+        event_type = "message"  # SSE default event type
         async with client.stream("POST", "/api/v1/query/stream", json=stream_payload) as stream_resp:
             print(f"{GREEN}[✓] SSE Stream Connected! (Status {stream_resp.status_code}){RESET}")
             async for line in stream_resp.aiter_lines():
-                if line.startswith("event: "):
+                if line == "":
+                    event_type = "message"  # Reset to SSE default at each event boundary
+                elif line.startswith("event: "):
                     event_type = line.replace("event: ", "").strip()
                     print(f"  {MAGENTA}► Event:{RESET} {BOLD}{event_type}{RESET}")
                     event_count += 1

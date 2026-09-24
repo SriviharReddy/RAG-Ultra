@@ -1,13 +1,20 @@
-import os
-import base64
 import asyncio
-from typing import Dict, Any, List, Optional
+import base64
+import hashlib
+import logging
+import os
+from typing import Any
+
 import httpx
-from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
-from my_agent.utils.state import AgentState, DocumentChunk, Citation
+from pydantic import BaseModel, Field
+
+from core.config import get_fast_llm, get_generation_llm, get_settings
 from core.database import get_database
-from core.config import get_settings, get_fast_llm, get_generation_llm
+from rag_pipeline.utils.state import AgentState, Citation, DocumentChunk
+from rag_pipeline.utils.tools import encode_image_data_uri
+
+logger = logging.getLogger(__name__)
 
 # --- Pydantic Schemas for Structured LLM-as-a-Judge ---
 
@@ -18,7 +25,7 @@ class GradeEvaluation(BaseModel):
     critique: str = Field(
         description="Brief justification of what information is present, missing, or why retrieval needs adjustment."
     )
-    expanded_query: Optional[str] = Field(
+    expanded_query: str | None = Field(
         default=None,
         description="A refined, search-optimized query with synonymous keywords if current context is insufficient."
     )
@@ -37,24 +44,24 @@ class GroundednessEvaluation(BaseModel):
 # --- Reciprocal Rank Fusion & Deduplication Helper ---
 
 def merge_chunks_rrf(
-    existing_chunks: List[DocumentChunk],
-    new_chunks: List[DocumentChunk],
+    existing_chunks: list[DocumentChunk],
+    new_chunks: list[DocumentChunk],
     k: int = 60,
     top_n: int = 4
-) -> List[DocumentChunk]:
+) -> list[DocumentChunk]:
     """
     Merges prior retrieval hits with newly expanded search results using
     Reciprocal Rank Fusion (RRF) and content deduplication.
     """
-    scores: Dict[str, float] = {}
-    chunk_map: Dict[str, DocumentChunk] = {}
+    scores: dict[str, float] = {}
+    chunk_map: dict[str, DocumentChunk] = {}
 
     def get_chunk_key(c: DocumentChunk) -> str:
         meta = c.get("metadata", {})
         source = meta.get("source", "")
         page = meta.get("page", "")
         idx = meta.get("chunk_index", "")
-        content_hash = str(hash(c.get("content", "")))[:12]
+        content_hash = hashlib.md5(c.get("content", "").encode(), usedforsecurity=False).hexdigest()[:12]
         return f"{source}:{page}:{idx}:{content_hash}"
 
     for rank, chunk in enumerate(existing_chunks):
@@ -68,7 +75,7 @@ def merge_chunks_rrf(
         scores[key] = scores.get(key, 0.0) + (1.0 / (k + rank + 1))
 
     sorted_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
-    merged: List[DocumentChunk] = []
+    merged: list[DocumentChunk] = []
     for key in sorted_keys[:top_n]:
         item = chunk_map[key]
         item["score"] = float(scores[key])
@@ -78,7 +85,7 @@ def merge_chunks_rrf(
 
 # --- Graph Node Implementations ---
 
-async def retrieve_node(state: AgentState) -> Dict[str, Any]:
+async def retrieve_node(state: AgentState) -> dict[str, Any]:
     """
     Retrieves relevant document chunks from Chroma.
     Supports query expansion on retries, metadata filtering, and RRF result merging.
@@ -90,10 +97,10 @@ async def retrieve_node(state: AgentState) -> Dict[str, Any]:
     # Determine query: Use expanded query if available from previous judge critique
     if retry_count > 0 and state.get("expanded_query"):
         search_query = state["expanded_query"]
-        print(f"[Retrieve Node] Executing expanded search query (Retry {retry_count}): '{search_query}'")
+        logger.info(f"[Retrieve Node] Executing expanded search query (Retry {retry_count}): '{search_query}'")
     else:
         search_query = state.get("condensed_query") or state.get("query", "")
-        print(f"[Retrieve Node] Executing search query: '{search_query}'")
+        logger.info(f"[Retrieve Node] Executing search query: '{search_query}'")
 
     metadata_filter = state.get("metadata_filter")
     raw_results = await db.similarity_search_with_score_async(
@@ -102,12 +109,18 @@ async def retrieve_node(state: AgentState) -> Dict[str, Any]:
         metadata_filter=metadata_filter
     )
 
-    new_chunks: List[DocumentChunk] = []
+    new_chunks: list[DocumentChunk] = []
     for doc, score in raw_results:
-        parent_text = doc.metadata.get("parent_content", doc.page_content)
+        # Look up parent content from store; fall back to legacy inline metadata then page_content
+        parent_key = doc.metadata.get("parent_key", "")
+        if parent_key:
+            parent_text = db.get_parent_content(parent_key)
+        else:
+            parent_text = doc.metadata.get("parent_content", doc.page_content)
+        chunk_metadata = {k: v for k, v in doc.metadata.items() if k != "parent_content"}
         chunk = DocumentChunk(
             content=parent_text,
-            metadata=dict(doc.metadata),
+            metadata=chunk_metadata,
             score=float(score)
         )
         new_chunks.append(chunk)
@@ -115,17 +128,17 @@ async def retrieve_node(state: AgentState) -> Dict[str, Any]:
     existing_chunks = state.get("retrieved_chunks", [])
     if existing_chunks:
         merged_chunks = merge_chunks_rrf(existing_chunks, new_chunks, top_n=settings.top_k + 1)
-        print(f"[Retrieve Node] RRF merged {len(existing_chunks)} prior chunks + {len(new_chunks)} new chunks -> {len(merged_chunks)} unique chunks.")
+        logger.info(f"[Retrieve Node] RRF merged {len(existing_chunks)} prior chunks + {len(new_chunks)} new chunks -> {len(merged_chunks)} unique chunks.")
     else:
         merged_chunks = new_chunks
-        print(f"[Retrieve Node] Retrieved {len(merged_chunks)} initial chunks.")
+        logger.info(f"[Retrieve Node] Retrieved {len(merged_chunks)} initial chunks.")
 
     return {
         "retrieved_chunks": merged_chunks,
         "query": search_query
     }
 
-async def evaluate_relevance_node(state: AgentState) -> Dict[str, Any]:
+async def evaluate_relevance_node(state: AgentState) -> dict[str, Any]:
     """
     LLM-as-a-Judge node with structured Pydantic output.
     Assesses context relevance and completeness, triggering corrective query expansion if needed.
@@ -154,11 +167,11 @@ async def evaluate_relevance_node(state: AgentState) -> Dict[str, Any]:
 
     # High-confidence fast-path: Bypass judge LLM when top chunk has high relevance
     top_chunk_score = chunks[0].get("score")
-    if top_chunk_score is not None and top_chunk_score >= 0.82:
-        print(f"[Judge Fast-Path] Top chunk score ({top_chunk_score:.3f} >= 0.82) indicates high confidence. Bypassing judge LLM.")
+    if top_chunk_score is not None and top_chunk_score <= 0.3:
+        logger.info(f"[Judge Fast-Path] Top chunk score (distance {top_chunk_score:.3f} <= 0.3) indicates high confidence. Bypassing judge LLM.")
         return {
             "is_relevant": True,
-            "critique": f"High confidence similarity match (Score: {top_chunk_score:.3f}).",
+            "critique": f"Low distance match (Score: {top_chunk_score:.3f}).",
             "expanded_query": None,
             "route_decision": "assemble",
             "retry_count": retry_count
@@ -190,9 +203,9 @@ Provide an objective assessment:
         is_relevant = evaluation.is_relevant
         critique = evaluation.critique
         expanded_query = evaluation.expanded_query
-        print(f"[Judge Evaluation] Relevant: {is_relevant} | Critique: {critique}")
+        logger.info(f"[Judge Evaluation] Relevant: {is_relevant} | Critique: {critique}")
     except Exception as e:
-        print(f"[Judge Evaluation Warning] Structured output unavailable/failed ({e}). Running heuristic grading.")
+        logger.warning(f"[Judge Evaluation Warning] Structured output unavailable/failed ({e}). Running heuristic grading.")
         # Heuristic fallback: check keyword presence
         query_words = set(query.lower().split())
         context_words = set(contexts_text.lower().split())
@@ -216,7 +229,7 @@ Provide an objective assessment:
         "retry_count": retry_count
     }
 
-async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
+async def assemble_multimodal_context_node(state: AgentState) -> dict[str, Any]:
     """
     Assembles multimodal context payloads:
     1. Deduplicates parent markdown and numbered citation blocks.
@@ -228,8 +241,8 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
     chunks = state.get("retrieved_chunks", [])
     settings = get_settings()
 
-    citations: List[Citation] = []
-    text_context_blocks: List[str] = []
+    citations: list[Citation] = []
+    text_context_blocks: list[str] = []
     image_tasks = []
     seen_images = set()
 
@@ -264,44 +277,42 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
             image_tasks.append((citation_id, candidate_image))
 
     # Concurrently load images
-    async def load_single_image(cid: int, img_source: str) -> Optional[Dict[str, Any]]:
+    async def load_single_image(cid: int, img_source: str) -> dict[str, Any] | None:
         try:
-            if os.path.exists(img_source):
-                with open(img_source, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                return {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
-                }
-            elif img_source.startswith("http://") or img_source.startswith("https://"):
+            if img_source.startswith("http://") or img_source.startswith("https://"):
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.get(img_source)
                     if resp.status_code == 200:
-                        b64 = base64.b64encode(resp.content).decode("utf-8")
+                        mime_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                        encoded = base64.b64encode(resp.content).decode("utf-8")
                         return {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
+                            "image_url": {"url": f"data:{mime_type};base64,{encoded}", "detail": "high"}
                         }
+                return None
+
+            if os.path.exists(img_source):
+                local_path = img_source
             elif img_source.startswith("/static/images/"):
-                # Map static URL to local storage directory
-                rel_path = img_source.replace("/static/images/", "")
+                rel_path = img_source.replace("/static/images/", "", 1)
                 local_path = os.path.join(settings.image_storage_dir, rel_path)
-                if os.path.exists(local_path):
-                    with open(local_path, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode("utf-8")
-                    return {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
-                    }
+            else:
+                return None
+
+            if os.path.exists(local_path):
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": encode_image_data_uri(local_path), "detail": "high"}
+                }
         except Exception as err:
-            print(f"[Multimodal Assembly] Skipped image {img_source}: {err}")
+            logger.warning(f"[Multimodal Assembly] Skipped image {img_source}: {err}")
         return None
 
     loaded_images = []
     if image_tasks:
         results = await asyncio.gather(*[load_single_image(cid, src) for cid, src in image_tasks])
         loaded_images = [img for img in results if img is not None]
-        print(f"[Multimodal Assembly] Concurrently loaded {len(loaded_images)} visual page images.")
+        logger.info(f"[Multimodal Assembly] Concurrently loaded {len(loaded_images)} visual page images.")
 
     # Formulate generation messages
     system_instruction = (
@@ -318,7 +329,7 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
         "Generate a comprehensive, structured response with inline citations [^N]."
     )
 
-    llm_payload: List[Dict[str, Any]] = [{"type": "text", "text": user_prompt_text}]
+    llm_payload: list[dict[str, Any]] = [{"type": "text", "text": user_prompt_text}]
     for img_item in loaded_images:
         llm_payload.append(img_item)
 
@@ -331,7 +342,7 @@ async def assemble_multimodal_context_node(state: AgentState) -> Dict[str, Any]:
         "route_decision": "generate"
     }
 
-async def generate_response_node(state: AgentState) -> Dict[str, Any]:
+async def generate_response_node(state: AgentState) -> dict[str, Any]:
     """
     Invokes the multimodal generation model to synthesize a grounded answer.
     """
@@ -340,9 +351,9 @@ async def generate_response_node(state: AgentState) -> Dict[str, Any]:
         gen_llm = get_generation_llm(temperature=0.1)
         response = await gen_llm.ainvoke(llm_inputs)
         answer = str(response.content).strip()
-        print(f"[Generate Node] Synthesized response ({len(answer)} chars).")
+        logger.info(f"[Generate Node] Synthesized response ({len(answer)} chars).")
     except Exception as e:
-        print(f"[Generate Node Warning] Flagship LLM invocation failed ({e}), generating deterministic synthesis.")
+        logger.warning(f"[Generate Node Warning] Flagship LLM invocation failed ({e}), generating deterministic synthesis.")
         # Fallback local synthesis from chunks and citations
         chunks = state.get("retrieved_chunks", [])
         if chunks:
@@ -356,7 +367,7 @@ async def generate_response_node(state: AgentState) -> Dict[str, Any]:
         "route_decision": "verify"
     }
 
-async def verify_groundedness_node(state: AgentState) -> Dict[str, Any]:
+async def verify_groundedness_node(state: AgentState) -> dict[str, Any]:
     """
     Self-Correction Node: Checks if the generated answer contains ungrounded claims or hallucinations.
     If ungrounded and retries remain, triggers loopback to retrieve node.
@@ -390,9 +401,9 @@ Determine:
         is_grounded = eval_result.is_grounded
         groundedness_score = eval_result.groundedness_score
         critique = eval_result.critique
-        print(f"[Groundedness Verifier] Score: {groundedness_score} | Grounded: {is_grounded} | Critique: {critique}")
+        logger.info(f"[Groundedness Verifier] Score: {groundedness_score} | Grounded: {is_grounded} | Critique: {critique}")
     except Exception as e:
-        print(f"[Groundedness Verifier Warning] Structured verification skipped ({e}), accepting response as grounded.")
+        logger.warning(f"[Groundedness Verifier Warning] Structured verification skipped ({e}), accepting response as grounded.")
         is_grounded = True
         groundedness_score = 1.0
         critique = "Verified with default groundedness."
@@ -400,7 +411,7 @@ Determine:
     if is_grounded or retry_count >= settings.max_retries:
         route_decision = "end"
     else:
-        print(f"[Groundedness Verifier] Answer ungrounded, initiating corrective retrieval loop (Attempt {retry_count + 1})...")
+        logger.warning(f"[Groundedness Verifier] Answer ungrounded, initiating corrective retrieval loop (Attempt {retry_count + 1})...")
         route_decision = "retrieve"
         retry_count += 1
 
