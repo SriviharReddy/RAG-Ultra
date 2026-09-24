@@ -31,7 +31,7 @@ RAG-Ultra includes a dedicated ingestion engine capable of parsing complex techn
              |
              v
 +----------------------------+
-| 5. Chroma Vector Indexer   | --> Stores child chunks with embedded parent text & image URIs
+| 5. Chroma & ParentStore    | --> Embeds child chunks (with parent_key); stores parent text in ParentStore
 +----------------------------+
 ```
 

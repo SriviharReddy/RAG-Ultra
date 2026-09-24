@@ -25,8 +25,8 @@ RAG-Ultra is an agentic **Retrieval-as-a-Service (RaaS)** microservice designed 
 [Recursive MD Splitter]   --> Preserves Markdown tables (| col |), headers, code fences
          |
          v
-[Chroma Vector Store]     --> Embeds child chunks; writes parent Markdown and image path
-                              directly into child metadata (Single-Database Pattern).
+[Chroma Vector Store]     --> Embeds child chunks; parent content stored once in ParentStore
+                              and referenced via parent_key in child metadata.
 
 ========================================================================================
 2. INFERENCE & AGENTIC REASONING (LangGraph State Machine)
@@ -43,10 +43,10 @@ RAG-Ultra is an agentic **Retrieval-as-a-Service (RaaS)** microservice designed 
 |               +--------------+---------------------------------------+
 |                              |
 |                              v
-|               [ Evaluate Node (LLM-as-a-Judge) ]
-|               | Fast-Path: If top score >= 0.82 -> Bypass Judge
-|               | Otherwise: Pydantic GradeEvaluation (is_relevant, critique)
-|               +--------------+---------------------------------------+
+               [ Evaluate Node (LLM-as-a-Judge) ]
+               | Fast-Path: If top score (cosine distance) <= 0.30 -> Bypass Judge
+               | Otherwise: Pydantic GradeEvaluation (is_relevant, critique)
+               +--------------+---------------------------------------+
 |                              |
 |          (Relevant / Max Retries)         (Insufficient Context)
 |                              |                       |
@@ -75,12 +75,11 @@ RAG-Ultra is an agentic **Retrieval-as-a-Service (RaaS)** microservice designed 
 
 ## 2. Core Architectural Principles
 
-### A. Single-Database Parent Payloads
-Traditional hierarchical retrieval pairs a vector database (for child chunks) with an external document or key-value store (for parent sections). 
+### A. Deduplicated Parent Store (ParentStore)
+Traditional hierarchical retrieval pairs a vector database (for child chunks) with an external document or key-value store (for parent sections). Storing parent content inside every child chunk's vector metadata causes an $O(\text{pages} \times \text{chunks\_per\_page})$ storage explosion.
 
 **RAG-Ultra's Solution:**
-Child chunks are embedded in Chroma while the full parent page Markdown, image URI, and provenance metadata are stored **directly inside the child document's metadata payload**. This eliminates dual-database synchronization issues, network hops, and lookup latency.
-
+Child chunks are embedded in Chroma and point to their parent page via a lightweight `parent_key` (`{doc_id}::{page_num}`). Full parent Markdown is stored once in a JSON-backed `ParentStore` persisted alongside the vector index. On retrieval, parent content is resolved seamlessly by key, with backward-compatible fallback to legacy inline metadata.
 ### B. Anthropic Contextual Retrieval
 Isolated chunks often lack the context needed for accurate semantic search. RAG-Ultra enriches every chunk with a page-level contextual overlay:
 ```text
@@ -92,7 +91,7 @@ This increases vector search recall on ambiguous queries by up to 35%.
 
 ### C. Corrective RAG (CRAG) with Structured Pydantic Output
 Instead of simple linear retrieve-and-generate, the query execution graph verifies context before generating answers:
-1. **High-Confidence Fast-Path**: When the top retrieved chunk has a high similarity score ($\ge 0.82$), the system directly proceeds to context assembly, bypassing the evaluator LLM to save tokens and ~40% latency.
+1. **High-Confidence Fast-Path**: When the top retrieved chunk has a low cosine distance ($\le 0.30$), the system directly proceeds to context assembly, bypassing the evaluator LLM to save tokens and ~40% latency.
 2. **Structured LLM-as-a-Judge**: Evaluates context using Pydantic `GradeEvaluation`:
    ```python
    class GradeEvaluation(BaseModel):
