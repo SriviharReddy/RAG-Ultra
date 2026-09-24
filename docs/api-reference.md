@@ -62,6 +62,12 @@ Uploads and indexes a PDF or Markdown document. Performs page normalization, ima
   "message": "Successfully indexed document 'turbine_manual.pdf' with 6 chunks."
 }
 ```
+#### Error Responses
+| Status Code | Detail | Reason |
+| :--- | :--- | :--- |
+| `400 Bad Request` | `Unsupported file format...` | File is not `.pdf`, `.md`, or `.txt`. |
+| `413 Payload Too Large` | `File too large. Maximum 100 MB.` | Ingest payload exceeds 100 MB. |
+| `500 Internal Server Error` | `Internal ingestion failure...` | Server error during parsing or indexing (logged server-side). |
 
 #### Example cURL:
 ```bash
@@ -71,7 +77,6 @@ curl -X POST http://localhost:8080/api/v1/ingest \
   -F "chunk_size=600" \
   -F "chunk_overlap=80"
 ```
-
 ---
 
 ## 3. Stateless Query
@@ -134,10 +139,16 @@ Executes the full agentic Corrective RAG pipeline. If `chat_history` is supplied
     "is_relevant": true,
     "is_grounded": true,
     "groundedness_score": 1.0,
-    "critique": "High confidence similarity match (Score: 1.479)."
+    "critique": "Low distance match (Score: 0.142)."
   }
 }
 ```
+
+#### Error Responses
+| Status Code | Detail | Reason |
+| :--- | :--- | :--- |
+| `504 Gateway Timeout` | `Query processing timed out after 120 seconds.` | LangGraph execution exceeded the 120s request limit. |
+| `500 Internal Server Error` | `Internal error processing query...` | Server error during workflow execution (logged server-side). |
 
 #### Example cURL:
 ```bash
@@ -148,7 +159,6 @@ curl -X POST http://localhost:8080/api/v1/query \
     "chat_history": []
   }'
 ```
-
 ---
 
 ## 4. Real-Time Streaming (SSE)
@@ -170,7 +180,7 @@ Streams real-time Server-Sent Events (`text/event-stream`) representing graph ex
 3. **`event: retrieving`**: Number and sources of candidate chunks retrieved.
 4. **`event: evaluating`**: LLM-as-a-Judge relevance verdict, critique, and route decision.
 5. **`event: multimodal_assembly`**: Loaded inline citations and visual diagram count.
-6. **`event: token`**: Streamed response token chunks.
+6. **`event: token`**: Real-time LLM token chunks emitted via LangGraph `astream_events(version="v2")` as they are generated.
 7. **`event: verifying`**: Groundedness verification score and critique.
 8. **`event: final_result`**: Complete JSON payload with answer, citations, and execution latency.
 9. **`event: done`**: Stream completion signal.
