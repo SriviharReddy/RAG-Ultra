@@ -2,17 +2,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-import os
-import base64
 import asyncio
-from typing import Dict, Any, List, Optional
+import base64
+import os
+from typing import Any, Dict, List, Optional
+
 import httpx
-from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
-from my_agent.utils.tools import encode_image_data_uri
-from my_agent.utils.state import AgentState, DocumentChunk, Citation
+from pydantic import BaseModel, Field
+
+from core.config import get_fast_llm, get_generation_llm, get_settings
 from core.database import get_database
-from core.config import get_settings, get_fast_llm, get_generation_llm
+from my_agent.utils.state import AgentState, Citation, DocumentChunk
+from my_agent.utils.tools import encode_image_data_uri
 
 # --- Pydantic Schemas for Structured LLM-as-a-Judge ---
 

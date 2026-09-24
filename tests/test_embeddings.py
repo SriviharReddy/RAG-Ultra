@@ -1,4 +1,8 @@
+import json
 import math
+import os
+import subprocess
+import sys
 
 import numpy as np
 
@@ -70,3 +74,41 @@ def test_empty_and_whitespace_input():
         assert len(vec) == 128
         assert all(v == 0.0 for v in vec)
         assert np.linalg.norm(vec) == 0.0
+
+
+def test_cross_process_determinism():
+    """Embedding vectors must be identical across processes with different PYTHONHASHSEED values.
+
+    The original bug used Python's randomized hash(), which produced different
+    vectors in different processes. This test spawns two subprocesses with
+    different PYTHONHASHSEED values and compares the serialized vectors.
+    """
+    code = (
+        "import json\n"
+        "from core.config import DeterministicOfflineEmbeddings\n"
+        "e = DeterministicOfflineEmbeddings(size=512)\n"
+        "vec = e.embed_query('Cross-process determinism check')\n"
+        "print(json.dumps(vec))\n"
+    )
+
+    env_a = {**os.environ, "PYTHONHASHSEED": "1"}
+    env_b = {**os.environ, "PYTHONHASHSEED": "987654"}
+
+    result_a = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, env=env_a, cwd=os.getcwd(),
+    )
+    result_b = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, env=env_b, cwd=os.getcwd(),
+    )
+
+    assert result_a.returncode == 0, result_a.stderr
+    assert result_b.returncode == 0, result_b.stderr
+
+    vec_a = json.loads(result_a.stdout.strip())
+    vec_b = json.loads(result_b.stdout.strip())
+
+    assert vec_a == vec_b, (
+        "Embedding vectors differ across processes with different PYTHONHASHSEED values"
+    )

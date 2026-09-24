@@ -3,7 +3,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 from langchain_core.messages import HumanMessage
+
 from core.config import get_fast_llm
+
 
 class ContextualRetrievalEnricher:
     """

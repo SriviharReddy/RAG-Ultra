@@ -1,6 +1,6 @@
-import pytest
 from langgraph.graph import END
-from my_agent.agent import route_relevance, route_groundedness
+
+from my_agent.agent import route_groundedness, route_relevance
 
 
 def test_route_relevance_retrieve():

@@ -36,6 +36,7 @@ EMBEDDING_MODEL=text-embedding-3-small
 PERSIST_DIR=./db_storage/chroma
 IMAGE_STORAGE_DIR=./db_storage/images
 COLLECTION_NAME=sota_rag_collection
+EMBEDDING_VERSION=crc32-v1
 
 # ==============================================================================
 # Execution Parameters
@@ -74,6 +75,7 @@ LANGSMITH_PROJECT=rag-ultra-agent
 | `PERSIST_DIR` | String | `./db_storage/chroma` | Local directory for Chroma vector database persistence. |
 | `IMAGE_STORAGE_DIR` | String | `./db_storage/images` | Local directory where normalized 150 DPI page frames are saved. |
 | `COLLECTION_NAME` | String | `sota_rag_collection` | Chroma collection name. |
+| `EMBEDDING_VERSION` | String | `crc32-v1` | Version tag for the offline embedding algorithm. Collections persisted under a different version are automatically rebuilt (destructive migration). |
 | `MAX_RETRIES` | Integer | `3` | Maximum Corrective RAG query reformulation retries. |
 | `CHUNK_SIZE` | Integer | `800` | Target character size for child text chunks. |
 | `CHUNK_OVERLAP` | Integer | `100` | Overlap character size between adjacent child chunks. |

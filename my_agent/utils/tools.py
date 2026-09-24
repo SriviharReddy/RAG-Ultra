@@ -2,14 +2,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-import os
 import base64
 import mimetypes
-from typing import Dict, Any
-from langchain_core.tools import tool
+import os
+from typing import Any, Dict
+
 from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+
 from core.config import get_settings
+
 
 def encode_image_data_uri(image_path: str) -> str:
     """Encode a local image as a Base64 data URI using its detected MIME type."""

@@ -2272,6 +2272,7 @@ name = "rag-ultra"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "chromadb" },
     { name = "fastapi", extra = ["all"] },
     { name = "httpx" },
     { name = "langchain-chroma" },
@@ -2294,6 +2295,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "chromadb", specifier = ">=1.5.0" },
     { name = "fastapi", extras = ["all"], specifier = ">=0.136.3" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain-chroma", specifier = ">=1.1.0" },

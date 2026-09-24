@@ -1,4 +1,5 @@
-from typing import TypedDict, List, Optional, Dict, Any, Literal
+from typing import Any, Dict, List, Literal, Optional, TypedDict
+
 
 class DocumentChunk(TypedDict, total=False):
     content: str

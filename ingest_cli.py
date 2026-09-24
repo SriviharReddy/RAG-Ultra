@@ -2,20 +2,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-import os
-import io
 import argparse
 import asyncio
+import io
+import os
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
-from PIL import Image
+from typing import Any, Dict, List, Optional
+
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from my_agent.utils.tools import vision_ocr_parse
-from core.database import get_database
-from core.contextualizer import ContextualRetrievalEnricher
+from PIL import Image
+
 from core.config import get_settings
+from core.contextualizer import ContextualRetrievalEnricher
+from core.database import get_database
+from my_agent.utils.tools import vision_ocr_parse
 
 load_dotenv()
 
@@ -50,12 +52,12 @@ def render_and_cache_pdf_pages(pdf_path: str, doc_id: str, dpi: int = 150) -> Li
         zoom = dpi / 72.0
         matrix = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=matrix)
-        
+
         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
         image_filename = f"page_{page_num}.jpg"
         image_disk_path = os.path.join(doc_image_dir, image_filename)
         img.save(image_disk_path, format="JPEG", quality=85)
-        
+
         # Static URL path for API clients/browser
         image_rel_url = f"/static/images/{doc_id}/{image_filename}"
 
@@ -204,6 +206,10 @@ async def ingest_file(
     }
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Ingest PDF or Markdown documents into the SOTA RAG database.")
     parser.add_argument("--pdf", "--file", dest="file_path", type=str, required=True, help="Path to local PDF/MD file")
     parser.add_argument("--id", dest="doc_id", type=str, default="doc_001", help="Document Identifier")

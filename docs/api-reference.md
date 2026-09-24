@@ -174,6 +174,7 @@ Streams real-time Server-Sent Events (`text/event-stream`) representing graph ex
 7. **`event: verifying`**: Groundedness verification score and critique.
 8. **`event: final_result`**: Complete JSON payload with answer, citations, and execution latency.
 9. **`event: done`**: Stream completion signal.
+10. **`event: error`** (on failure): Emitted if the workflow encounters an unexpected error. The server logs the full exception; only a generic message is sent to the client.
 
 #### Example Stream Output:
 ```text
@@ -207,6 +208,8 @@ data: {"answer": "...", "citations": [...], "metadata": {...}}
 event: done
 data: {"status": "completed"}
 ```
+
+> **Error Handling:** On unexpected failures, the server emits `event: error` with a generic message (`"Internal error processing query. Check server logs for details."`). The full exception is logged server-side via `logger.exception()`; raw exception details are never sent to the client.
 
 #### Example cURL:
 ```bash

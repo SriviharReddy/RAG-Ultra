@@ -1,9 +1,16 @@
 import asyncio
+import logging
 import threading
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
+
+import chromadb
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from core.config import get_settings, get_embeddings
+
+from core.config import get_embeddings, get_settings
+
+logger = logging.getLogger(__name__)
+
 
 class SotaRagDatabase:
     """
@@ -17,12 +24,44 @@ class SotaRagDatabase:
         settings = get_settings()
         self.persist_dir = persist_dir or settings.persist_dir
         self.collection_name = collection_name or settings.collection_name
+        self.embedding_version = settings.embedding_version
         self.embeddings = get_embeddings()
+
+        # Detect and rebuild collections persisted under an incompatible
+        # embedding algorithm so stale vectors are never queried.
+        self._migrate_legacy_collection()
+
         self.vector_db = Chroma(
             collection_name=self.collection_name,
             embedding_function=self.embeddings,
-            persist_directory=self.persist_dir
+            persist_directory=self.persist_dir,
+            collection_metadata={"embedding_version": self.embedding_version}
         )
+
+    def _migrate_legacy_collection(self) -> None:
+        """Detect collections created with an incompatible embedding version and rebuild them.
+
+        When the offline embedding algorithm changes (e.g. hash() -> MD5 -> CRC32),
+        previously persisted vectors become incompatible with new queries. This method
+        checks the persisted collection's version marker and destroys it for a clean
+        rebuild if the version does not match.
+        """
+        client = chromadb.PersistentClient(path=self.persist_dir)
+        try:
+            coll = client.get_collection(self.collection_name)
+            meta = coll.metadata or {}
+            if meta.get("embedding_version") != self.embedding_version:
+                logger.warning(
+                    "Collection '%s' has embedding version '%s'; expected '%s'. "
+                    "Rebuilding collection (destructive migration).",
+                    self.collection_name,
+                    meta.get("embedding_version"),
+                    self.embedding_version,
+                )
+                client.delete_collection(self.collection_name)
+        except Exception:
+            # Collection does not exist yet — created automatically by Chroma
+            pass
 
     def ingest_hierarchical_document(
         self,
@@ -49,7 +88,7 @@ class SotaRagDatabase:
             }
             doc = Document(page_content=enriched_content, metadata=metadata)
             documents_to_insert.append(doc)
-        
+
         if documents_to_insert:
             return self.vector_db.add_documents(documents_to_insert)
         return []

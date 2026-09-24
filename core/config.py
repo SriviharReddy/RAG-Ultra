@@ -1,14 +1,21 @@
 import os
-import hashlib
+import zlib
 from functools import lru_cache
-from typing import Optional, List
+from typing import List, Optional
+
 import numpy as np
 from dotenv import load_dotenv
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from langchain_core.embeddings import Embeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
+
+
+# Version tag for the offline embedding algorithm. Stored as collection
+# metadata so legacy vectors (created under hash() or MD5) are detected
+# and rebuilt during database initialization.
+EMBEDDING_VERSION = "crc32-v1"
 
 class DeterministicOfflineEmbeddings(Embeddings):
     """
@@ -23,7 +30,7 @@ class DeterministicOfflineEmbeddings(Embeddings):
         words = text.lower().replace("\n", " ").replace("|", " ").replace("-", " ").split()
         for w in words:
             if w:
-                h = int(hashlib.md5(w.encode()).hexdigest(), 16) % self.size
+                h = zlib.crc32(w.encode("utf-8")) % self.size
                 vec[h] += 1.0
         norm = np.linalg.norm(vec)
         if norm > 0:
@@ -67,6 +74,7 @@ class Settings(BaseSettings):
     persist_dir: str = "./db_storage/chroma"
     image_storage_dir: str = "./db_storage/images"
     collection_name: str = "sota_rag_collection"
+    embedding_version: str = EMBEDDING_VERSION
 
     # Agentic Execution Controls
     max_retries: int = 3
@@ -131,6 +139,6 @@ def get_embeddings() -> Embeddings:
         if settings.openai_base_url:
             emb_kwargs["base_url"] = settings.openai_base_url
         return OpenAIEmbeddings(**emb_kwargs)
-    
+
     # Graceful fallback to deterministic embeddings
     return DeterministicOfflineEmbeddings()

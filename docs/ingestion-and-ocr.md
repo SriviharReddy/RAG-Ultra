@@ -80,6 +80,9 @@ uv run python ingest_cli.py --file README.md --id readme_doc
 - `--chunk-size`: Character limit per child chunk (default: `800`).
 - `--chunk-overlap`: Overlap between consecutive chunks (default: `100`).
 
+### Logging:
+The CLI configures the root logger at `INFO` level and emits human-readable progress messages (page renders, chunk counts, OCR fallback notices) to stderr. Server-side error handlers log full exception traces via `logger.exception()`.
+
 ---
 
 ## 4. Programmatic Python Usage

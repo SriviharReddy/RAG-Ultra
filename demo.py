@@ -1,17 +1,17 @@
+import asyncio
+import json
 import os
 import sys
-import json
-import asyncio
 import tempfile
-import pymupdf  # PyMuPDF
-import httpx
-from httpx import ASGITransport
-from dotenv import load_dotenv
 
-from core.config import get_settings
+import httpx
+import pymupdf  # PyMuPDF
+from dotenv import load_dotenv
+from httpx import ASGITransport
+
+from app import ChatMessage, app, condense_query
 from ingest_cli import ingest_file
 from my_agent.agent import graph
-from app import app, condense_query, ChatMessage
 
 load_dotenv()
 
@@ -211,11 +211,13 @@ async def run_end_to_end_demo():
             "chat_history": []
         }
         event_count = 0
-        event_type = ""
+        event_type = "message"  # SSE default event type
         async with client.stream("POST", "/api/v1/query/stream", json=stream_payload) as stream_resp:
             print(f"{GREEN}[✓] SSE Stream Connected! (Status {stream_resp.status_code}){RESET}")
             async for line in stream_resp.aiter_lines():
-                if line.startswith("event: "):
+                if line == "":
+                    event_type = "message"  # Reset to SSE default at each event boundary
+                elif line.startswith("event: "):
                     event_type = line.replace("event: ", "").strip()
                     print(f"  {MAGENTA}► Event:{RESET} {BOLD}{event_type}{RESET}")
                     event_count += 1

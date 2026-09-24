@@ -1,20 +1,21 @@
-import os
-import time
-import json
-import uuid
-import tempfile
 import asyncio
+import json
 import logging
-from typing import Optional, List, Dict, Any, AsyncGenerator
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
+import os
+import tempfile
+import time
+import uuid
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from core.config import get_settings, get_fast_llm
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, Field
+
+from core.config import get_fast_llm, get_settings
 from core.database import get_database
 from ingest_cli import ingest_file
 from my_agent.agent import graph
@@ -195,7 +196,7 @@ async def ingest_document_file(
             total_chunks_indexed=stats.get("total_chunks_indexed", 0),
             message=f"Successfully indexed document '{filename}' with {stats.get('total_chunks_indexed', 0)} chunks."
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Ingestion failed for '%s'", filename)
         raise HTTPException(status_code=500, detail="Internal ingestion failure. Check server logs for details.")
     finally:
@@ -244,7 +245,7 @@ async def query_rag_agent(request: QueryRequest):
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         answer = final_state.get("answer") or "Could not generate an answer."
         citations_data = final_state.get("citations", [])
-        
+
         citations_response = [
             CitationResponse(
                 id=c.get("id", idx + 1),
@@ -284,7 +285,7 @@ async def query_rag_agent(request: QueryRequest):
             retrieved_chunks=retrieved_chunks_out,
             metadata=metadata
         )
-    except Exception as e:
+    except Exception:
         logger.exception("RAG workflow failed for query: '%s'", request.query)
         raise HTTPException(
             status_code=500,
@@ -334,7 +335,7 @@ async def query_rag_agent_stream(request: QueryRequest):
             async for output in graph.astream(initial_state):
                 for node_name, node_state in output.items():
                     latest_state.update(node_state)
-                    
+
                     if node_name == "retrieve":
                         chunks_summary = [
                             {"source": c.get("metadata", {}).get("source"), "page": c.get("metadata", {}).get("page")}
@@ -396,8 +397,9 @@ async def query_rag_agent_stream(request: QueryRequest):
             })
             yield format_sse("done", {"status": "completed"})
 
-        except Exception as err:
-            yield format_sse("error", {"message": str(err)})
+        except Exception:
+            logger.exception("Streaming RAG workflow failed for query: '%s'", request.query)
+            yield format_sse("error", {"message": "Internal error processing query. Check server logs for details."})
 
     return StreamingResponse(
         sse_event_generator(),
