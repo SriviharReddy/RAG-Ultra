@@ -131,7 +131,7 @@ rag-ultra/
 │   ├── database.py           # Thread-safe async Chroma parent-payload wrapper
 │   └── contextualizer.py     # Contextual Retrieval summarizer
 │
-├── my_agent/                 # Compiled LangGraph Workflow
+├── rag_pipeline/             # Compiled LangGraph Workflow
 │   ├── agent.py              # StateGraph with CRAG & verification edges
 │   └── utils/                # Nodes, state schemas, and tools
 │

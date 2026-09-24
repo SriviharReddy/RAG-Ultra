@@ -80,4 +80,3 @@ async def vision_ocr_parse(image_source: str) -> str:
     except Exception as e:
         logger.warning(f"[OCR Tool] {provider_name} call failed ({e}), falling back to native extractor.")
         return ""
-

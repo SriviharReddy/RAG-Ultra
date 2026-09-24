@@ -1,5 +1,5 @@
 from ingest_cli import process_markdown_or_text_file
-from my_agent.utils.tools import encode_image_data_uri
+from rag_pipeline.utils.tools import encode_image_data_uri
 
 
 def test_markdown_parsing_returns_named_page_records(tmp_path):

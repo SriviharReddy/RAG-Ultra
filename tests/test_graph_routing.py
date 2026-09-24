@@ -1,6 +1,6 @@
 from langgraph.graph import END
 
-from my_agent.agent import route_groundedness, route_relevance
+from rag_pipeline.agent import route_groundedness, route_relevance
 
 
 def test_route_relevance_retrieve():

@@ -32,7 +32,7 @@ dev = [
 asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
-packages = ["core", "my_agent"]
+packages = ["core", "rag_pipeline"]
 
 [tool.ruff]
 line-length = 100
@@ -48,4 +48,4 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["core", "my_agent", "schemas"]
+known-first-party = ["core", "rag_pipeline", "schemas"]

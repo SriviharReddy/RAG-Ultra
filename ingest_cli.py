@@ -15,7 +15,7 @@ from PIL import Image
 from core.config import get_settings
 from core.contextualizer import ContextualRetrievalEnricher
 from core.database import get_database
-from my_agent.utils.tools import vision_ocr_parse
+from rag_pipeline.utils.tools import vision_ocr_parse
 
 logger = logging.getLogger(__name__)
 

@@ -11,8 +11,8 @@ from httpx import ASGITransport
 
 from app import app, condense_query
 from ingest_cli import ingest_file
-from my_agent.agent import graph
-from my_agent.utils.state import make_initial_state
+from rag_pipeline.agent import graph
+from rag_pipeline.utils.state import make_initial_state
 from schemas import ChatMessage
 
 load_dotenv()

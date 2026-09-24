@@ -19,8 +19,8 @@ from langchain_core.messages import HumanMessage
 from core.config import get_fast_llm, get_settings
 from core.database import get_database
 from ingest_cli import ingest_file
-from my_agent.agent import graph
-from my_agent.utils.state import make_initial_state
+from rag_pipeline.agent import graph
+from rag_pipeline.utils.state import make_initial_state
 from schemas import (
     ChatMessage,
     CitationResponse,
@@ -267,57 +267,77 @@ async def query_rag_agent_stream(request: QueryRequest):
         latest_state = initial_state
 
         try:
-            # Stream node transitions
-            async for output in graph.astream(initial_state):
-                for node_name, node_state in output.items():
-                    latest_state.update(node_state)
+            current_node = ""
+            tokens_streamed = False
 
-                    if node_name == "retrieve":
+            async for event in graph.astream_events(initial_state, version="v2"):
+                kind = event["event"]
+                name = event.get("name", "")
+
+                # Track which graph node is executing
+                if kind == "on_chain_start" and name in {"retrieve", "evaluate", "assemble", "generate", "verify"}:
+                    current_node = name
+                    if name == "generate":
+                        tokens_streamed = False
+
+                # Node completed — emit structured SSE event
+                elif kind == "on_chain_end" and name in {"retrieve", "evaluate", "assemble", "generate", "verify"}:
+                    node_output = event.get("data", {}).get("output") or {}
+                    if isinstance(node_output, dict):
+                        latest_state.update(node_output)
+
+                    if name == "retrieve":
                         chunks_summary = [
                             {"source": c.get("metadata", {}).get("source"), "page": c.get("metadata", {}).get("page")}
-                            for c in node_state.get("retrieved_chunks", [])
+                            for c in node_output.get("retrieved_chunks", [])
                         ]
                         yield format_sse("retrieving", {
                             "node": "retrieve",
                             "chunks_found": len(chunks_summary),
                             "chunks": chunks_summary
                         })
-
-                    elif node_name == "evaluate":
+                    elif name == "evaluate":
                         yield format_sse("evaluating", {
                             "node": "evaluate",
-                            "is_relevant": node_state.get("is_relevant"),
-                            "critique": node_state.get("critique"),
-                            "expanded_query": node_state.get("expanded_query"),
-                            "route_decision": node_state.get("route_decision"),
-                            "retry_count": node_state.get("retry_count")
+                            "is_relevant": node_output.get("is_relevant"),
+                            "critique": node_output.get("critique"),
+                            "expanded_query": node_output.get("expanded_query"),
+                            "route_decision": node_output.get("route_decision"),
+                            "retry_count": node_output.get("retry_count")
                         })
-
-                    elif node_name == "assemble":
+                    elif name == "assemble":
                         citations = [
                             {"id": c.get("id"), "source": c.get("source"), "page": c.get("page")}
-                            for c in node_state.get("citations", [])
+                            for c in node_output.get("citations", [])
                         ]
                         yield format_sse("multimodal_assembly", {
                             "node": "assemble",
                             "citations": citations
                         })
-
-                    elif node_name == "generate":
-                        answer_text = node_state.get("answer", "")
-                        # Note: Answer is generated in bulk, then chunked for progressive client rendering.
-                        words = answer_text.split(" ")
-                        for i in range(0, len(words), 4):
-                            token_batch = " ".join(words[i:i+4]) + " "
-                            yield format_sse("token", {"chunk": token_batch})
-
-                    elif node_name == "verify":
+                    elif name == "generate":
+                        if not tokens_streamed:
+                            fallback_text = node_output.get("answer", "")
+                            if fallback_text:
+                                yield format_sse("token", {"chunk": fallback_text})
+                    elif name == "verify":
                         yield format_sse("verifying", {
                             "node": "verify",
-                            "is_grounded": node_state.get("is_grounded"),
-                            "groundedness_score": node_state.get("groundedness_score"),
-                            "critique": node_state.get("critique")
+                            "is_grounded": node_output.get("is_grounded"),
+                            "groundedness_score": node_output.get("groundedness_score"),
+                            "critique": node_output.get("critique")
                         })
+
+                    if current_node == name:
+                        current_node = ""
+
+                # Real token streaming from the generation LLM
+                elif kind == "on_chat_model_stream" and current_node == "generate":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        token = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                        if token:
+                            tokens_streamed = True
+                            yield format_sse("token", {"chunk": token})
 
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             yield format_sse("final_result", {
@@ -331,7 +351,6 @@ async def query_rag_agent_stream(request: QueryRequest):
                 }
             })
             yield format_sse("done", {"status": "completed"})
-
         except Exception:
             logger.exception("Streaming RAG workflow failed for query: '%s'", request.query)
             yield format_sse("error", {"message": "Internal error processing query. Check server logs for details."})

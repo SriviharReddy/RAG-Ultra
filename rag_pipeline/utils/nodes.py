@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 
 from core.config import get_fast_llm, get_generation_llm, get_settings
 from core.database import get_database
-from my_agent.utils.state import AgentState, Citation, DocumentChunk
-from my_agent.utils.tools import encode_image_data_uri
+from rag_pipeline.utils.state import AgentState, Citation, DocumentChunk
+from rag_pipeline.utils.tools import encode_image_data_uri
 
 logger = logging.getLogger(__name__)
 
@@ -111,10 +111,16 @@ async def retrieve_node(state: AgentState) -> dict[str, Any]:
 
     new_chunks: list[DocumentChunk] = []
     for doc, score in raw_results:
-        parent_text = doc.metadata.get("parent_content", doc.page_content)
+        # Look up parent content from store; fall back to legacy inline metadata then page_content
+        parent_key = doc.metadata.get("parent_key", "")
+        if parent_key:
+            parent_text = db.get_parent_content(parent_key)
+        else:
+            parent_text = doc.metadata.get("parent_content", doc.page_content)
+        chunk_metadata = {k: v for k, v in doc.metadata.items() if k != "parent_content"}
         chunk = DocumentChunk(
             content=parent_text,
-            metadata=dict(doc.metadata),
+            metadata=chunk_metadata,
             score=float(score)
         )
         new_chunks.append(chunk)

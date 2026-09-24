@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
 import threading
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any
 
 import chromadb
 from langchain_chroma import Chroma
@@ -12,13 +14,54 @@ from core.config import get_embeddings, get_settings
 logger = logging.getLogger(__name__)
 
 
+class ParentStore:
+    """Lightweight JSON-backed store for parent page content, avoiding
+    duplication across child chunks in Chroma metadata."""
+
+    def __init__(self, persist_dir: str):
+        self._path = Path(persist_dir) / "parent_store.json"
+        self._data: dict[str, str] = {}
+        if self._path.exists():
+            try:
+                self._data = json.loads(self._path.read_text(encoding="utf-8"))
+            except Exception:
+                self._data = {}
+
+    def put(self, doc_id: str, page: int | str, content: str) -> str:
+        """Store parent content and return the lookup key."""
+        key = f"{doc_id}::{page}"
+        self._data[key] = content
+        return key
+
+    def get(self, key: str) -> str:
+        """Retrieve parent content by key."""
+        return self._data.get(key, "")
+
+    def flush(self) -> None:
+        """Persist to disk."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
+
+    def clear_doc(self, doc_id: str) -> None:
+        """Remove all entries for a document (used during re-ingestion)."""
+        self._data = {k: v for k, v in self._data.items() if not k.startswith(f"{doc_id}::")}
+
+    def clear(self) -> None:
+        """Clear all entries and remove persisted file."""
+        self._data.clear()
+        if self._path.exists():
+            try:
+                self._path.unlink()
+            except OSError:
+                pass
+
 class SotaRagDatabase:
     """
     Persistent, thread-safe Chroma vector database manager.
     Supports single-database parent payload indexing, metadata filtering,
     and non-blocking asynchronous operations via asyncio.to_thread.
     """
-    _instance: Optional["SotaRagDatabase"] = None
+    _instance: "SotaRagDatabase | None" = None
 
     def __init__(self, persist_dir: str | None = None, collection_name: str | None = None):
         settings = get_settings()
@@ -38,6 +81,7 @@ class SotaRagDatabase:
             embedding_function=self.embeddings,
             collection_metadata={"hnsw:space": "cosine", "embedding_version": self.embedding_version}
         )
+        self.parent_store = ParentStore(self.persist_dir)
 
     def _migrate_legacy_collection(self) -> None:
         """Detect collections created with an incompatible embedding version and rebuild them.
@@ -59,6 +103,15 @@ class SotaRagDatabase:
                     self.embedding_version,
                 )
                 self._chroma_client.delete_collection(self.collection_name)
+                if hasattr(self, "parent_store"):
+                    self.parent_store.clear()
+                else:
+                    store_file = Path(self.persist_dir) / "parent_store.json"
+                    if store_file.exists():
+                        try:
+                            store_file.unlink()
+                        except OSError:
+                            pass
         except Exception:
             # Collection does not exist yet — created automatically by Chroma
             pass
@@ -73,25 +126,36 @@ class SotaRagDatabase:
         metadata_origin: dict[str, Any]
     ) -> list[str]:
         """
-        Ingests child chunks with contextual prefixes. Stores the full parent
-        Markdown and image URI directly in each child's metadata payload.
+        Ingests child chunks with contextual prefixes. Stores parent content in
+        parent store and associates chunks via parent_key in metadata.
         """
+        doc_id = str(metadata_origin.get("doc_id", "doc"))
+        page = metadata_origin.get("page", 0)
+        parent_key = self.parent_store.put(doc_id, page, parent_text)
+
         documents_to_insert = []
         for idx, chunk in enumerate(child_chunks):
             enriched_content = f"[Context: {context_prefix}]\n{chunk}"
             metadata = {
-                "parent_content": parent_text,
                 "image_url": image_url or "",
                 "has_visuals": bool(has_visuals),
                 "chunk_index": idx,
-                **metadata_origin
+                **metadata_origin,
+                "parent_key": parent_key,
             }
+            metadata.pop("parent_content", None)
             doc = Document(page_content=enriched_content, metadata=metadata)
             documents_to_insert.append(doc)
 
         if documents_to_insert:
-            return self.vector_db.add_documents(documents_to_insert)
+            res = self.vector_db.add_documents(documents_to_insert)
+            self.parent_store.flush()
+            return res
         return []
+
+    def get_parent_content(self, key: str) -> str:
+        """Retrieve parent content by key from the parent store."""
+        return self.parent_store.get(key)
 
     async def ingest_hierarchical_document_async(
         self,

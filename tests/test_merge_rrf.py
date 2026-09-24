@@ -1,7 +1,7 @@
 import pytest
 
-from my_agent.utils.nodes import merge_chunks_rrf
-from my_agent.utils.state import DocumentChunk
+from rag_pipeline.utils.nodes import merge_chunks_rrf
+from rag_pipeline.utils.state import DocumentChunk
 
 
 def make_chunk(content: str, source: str = "doc.pdf", page: int = 1, chunk_index: int = 0) -> DocumentChunk:
